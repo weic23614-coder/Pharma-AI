@@ -1,0 +1,16 @@
+.DS_Store
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# local runtime artifacts
+app.db
+*.sqlite
+*.sqlite3
+
+# logs
+*.log

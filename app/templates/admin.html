@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PharmaAI 综合运营后台</title>
+  <style>
+    :root { --bg:#f5f7fb; --card:#fff; --line:#e6ebf2; --text:#1f2a37; --muted:#6b7280; --brand:#2b7fff; --brand-weak:#edf4ff; --ok:#16a34a; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif; color:var(--text); background:var(--bg); }
+    .layout { display:grid; grid-template-columns:220px 1fr; min-height:100vh; }
+    .sidebar { border-right:1px solid var(--line); background:#fff; padding:18px 14px; }
+    .brand { display:flex; align-items:center; gap:10px; margin-bottom:20px; font-weight:700; }
+    .brand-dot { width:10px; height:10px; border-radius:50%; background:var(--brand); }
+    .menu { display:grid; gap:6px; }
+    .menu-item { border:1px solid transparent; border-radius:10px; padding:10px 12px; color:#334155; background:transparent; text-align:left; cursor:pointer; font-size:14px; }
+    .menu-item.active { background:var(--brand-weak); color:var(--brand); border-color:#d7e6ff; font-weight:600; }
+    .content { padding:18px 22px 24px; }
+    .topbar { display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; }
+    .title { font-size:26px; font-weight:700; margin-bottom:4px; }
+    .sub { color:var(--muted); font-size:14px; }
+    .actions { display:flex; gap:10px; align-items:center; }
+    .btn { border:1px solid var(--line); border-radius:10px; background:#fff; color:#334155; padding:9px 14px; cursor:pointer; font-weight:500; }
+    .btn.primary { background:var(--brand); color:#fff; border-color:var(--brand); }
+    .panel { border:1px solid var(--line); background:var(--card); border-radius:14px; padding:14px; margin-bottom:14px; }
+    .pipeline { display:grid; grid-template-columns:1fr 1fr 1fr auto; gap:10px; align-items:end; }
+    .field label { display:block; font-size:12px; color:var(--muted); margin-bottom:4px; }
+    .field input, .field select { width:100%; border:1px solid var(--line); border-radius:10px; height:38px; padding:0 10px; background:#fff; }
+    .summary { margin-top:10px; color:#334155; font-size:13px; padding:8px 10px; border:1px dashed #d8e1ef; background:#fbfdff; border-radius:10px; }
+    .notice { margin:0 0 12px; padding:10px 12px; border-radius:10px; font-size:13px; }
+    .notice.warn { background:#fff7ed; border:1px solid #fed7aa; color:#9a3412; }
+    .notice.ok { background:#ecfeff; border:1px solid #a5f3fc; color:#155e75; }
+    .kpi-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin-top:8px; }
+    .kpi { border:1px solid var(--line); background:#fff; border-radius:12px; padding:10px; }
+    .kpi .k { color:var(--muted); font-size:12px; } .kpi .v { margin-top:4px; font-size:20px; font-weight:700; }
+    .section-title { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; font-weight:700; }
+    table { width:100%; border-collapse:collapse; } th, td { border-bottom:1px solid #eff3f8; padding:10px 8px; font-size:13px; text-align:left; } th { color:#64748b; font-weight:600; background:#fafcff; }
+    .chip { display:inline-block; border:1px solid #d6e6ff; color:var(--brand); background:var(--brand-weak); border-radius:999px; padding:2px 8px; font-size:12px; }
+    .chip.rule { border-color:#d9e2ec; color:#475569; background:#f8fafc; }
+    .status { font-size:12px; border-radius:999px; padding:3px 8px; border:1px solid #dce3ef; color:#334155; background:#f8fbff; }
+    .status.confirmed { color:var(--ok); border-color:#b7ebc9; background:#effdf4; } .status.published { color:#14532d; border-color:#86efac; background:#dcfce7; }
+    .inline-actions { display:flex; gap:8px; }
+    .view { display:none; } .view.active { display:block; }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-dot"></span> PharmaAI</div>
+      <div class="menu">
+        <button class="menu-item" id="menu-inventory" onclick="switchView('inventory')">库存清单</button>
+        <button class="menu-item active" id="menu-bundle" onclick="switchView('bundle')">智能组货</button>
+        <button class="menu-item" id="menu-budget" onclick="switchView('budget')">预算与消耗</button>
+      </div>
+    </aside>
+    <main class="content">
+      <div class="topbar">
+        <div><div class="title" id="pageTitle">智能组货建议</div><div class="sub" id="pageSub">上传待组货商品后，从库存清单碰撞并生成AI组货建议。</div></div>
+        <div class="actions"><button class="btn" onclick="handleRefresh()">刷新</button><button class="btn primary" id="btnMainAction" onclick="opsSync()">一键同步已确认策略</button></div>
+      </div>
+      <div id="aiNotice" class="notice warn">AI状态检测中...</div>
+
+      <section class="view" id="view-inventory">
+        <section class="panel">
+          <div class="pipeline">
+            <div class="field"><label>上传库存清单（全量SKU）</label><input id="inventoryFile" type="file" accept=".xlsx,.xlsm,.xltx,.xltm" /></div>
+            <div class="field"><label>默认角色</label><select id="defaultRole"><option value="addon">通用商品</option><option value="main">通用商品</option></select></div>
+            <div class="field"><label>说明</label><input value="库存清单就是商品库唯一维护入口" disabled /></div>
+            <div class="inline-actions"><button class="btn primary" onclick="uploadInventory()">更新库存清单</button></div>
+          </div>
+          <div id="inventoryStats" class="summary">库存：-</div>
+        </section>
+        <section class="panel">
+          <div class="section-title">库存列表</div>
+          <div class="pipeline" style="grid-template-columns:1fr 220px auto; align-items:center;">
+            <div class="field"><label>搜索（SKU/商品名/类目）</label><input id="invSearch" placeholder="输入关键词后点查询" /></div>
+            <div class="field"><label>角色筛选</label><select id="invRole"><option value="">全部</option><option value="main">类型A</option><option value="addon">类型B</option></select></div>
+            <div class="inline-actions"><button class="btn" onclick="loadInventoryList()">查询</button></div>
+          </div>
+          <table style="margin-top:8px;">
+            <thead><tr><th>商品名称</th><th>类目</th><th>角色</th><th>价格</th><th>成本</th><th>毛利率</th><th>SKU</th></tr></thead>
+            <tbody id="inventoryTable"></tbody>
+          </table>
+        </section>
+      </section>
+
+      <section class="view active" id="view-bundle">
+        <section class="panel">
+          <div class="pipeline">
+            <div class="field"><label>上传待组货商品（Excel）</label><input id="opsFile" type="file" accept=".xlsx,.xlsm,.xltx,.xltm" onchange="onOpsFileChange()" /></div>
+            <div class="field"><label>生成范围 Top N</label><input id="opsTopN" type="number" value="300" min="1" max="5000" /></div>
+            <div class="field"><label>排序依据</label><select id="opsSortBy"><option value="qty">按销量优先</option><option value="gmv">按GMV优先</option></select></div>
+            <div class="inline-actions"><button class="btn primary" onclick="opsGenerate()">AI智能组货</button></div>
+          </div>
+          <div id="opsBatch" class="summary">尚未上传批次。</div>
+          <div id="opsSummary" class="summary">等待生成策略。</div>
+        </section>
+        <section class="panel"><div class="section-title">AI 运营监控</div><div id="metrics" class="kpi-grid"></div></section>
+        <section class="panel">
+          <div class="section-title">组货方案（待确认/已确认）</div>
+          <table><thead><tr><th>ID</th><th>商品A</th><th>建议搭配商品B</th><th>组货原因</th><th>来源</th><th>换购价</th><th>预计毛利</th><th>状态</th><th>操作</th></tr></thead><tbody id="opsTable"></tbody></table>
+        </section>
+      </section>
+
+      <section class="view" id="view-budget">
+        <section class="panel"><div class="section-title">AI 预算与消耗管理</div><div id="budgetCards" class="kpi-grid"></div></section>
+        <section class="panel">
+          <div class="section-title">模型与预算配置</div>
+          <div class="pipeline">
+            <div class="field"><label>模型</label><select id="budgetModel"><option value="qwen-plus">qwen-plus</option><option value="qwen-turbo">qwen-turbo</option><option value="qwen-max">qwen-max</option></select></div>
+            <div class="field"><label>月预算(USD)</label><input id="budgetMonthly" type="number" step="0.01" value="50" /></div>
+            <div class="field"><label>输入成本/1K token</label><input id="budgetInCost" type="number" step="0.0001" value="0.0012" /></div>
+            <div class="field"><label>输出成本/1K token</label><input id="budgetOutCost" type="number" step="0.0001" value="0.0024" /></div>
+          </div>
+          <div style="margin-top:10px;"><label><input id="budgetEnabled" type="checkbox" checked /> 启用AI组货</label><button class="btn primary" style="margin-left:10px;" onclick="saveBudgetSetting()">保存配置</button></div>
+        </section>
+      </section>
+    </main>
+  </div>
+  <script>
+    window.__opsBatchId = null; window.__activeView = 'bundle';
+    function switchView(view) {
+      window.__activeView = view;
+      ['inventory','bundle','budget'].forEach(v => { document.getElementById(`view-${v}`).classList.toggle('active', v===view); document.getElementById(`menu-${v}`).classList.toggle('active', v===view); });
+      const t = { inventory:['库存清单','库存清单是商品库唯一入口。'], bundle:['智能组货建议','上传待组货商品后，系统在库存清单中做商品碰撞生成AI建议（不区分主副品）。'], budget:['预算与消耗','查看Token消耗、预算使用率并切换模型。'] };
+      document.getElementById('pageTitle').textContent = t[view][0]; document.getElementById('pageSub').textContent = t[view][1];
+      const btn = document.getElementById('btnMainAction');
+      if (view==='bundle') { btn.textContent='一键同步已确认策略'; btn.onclick=opsSync; }
+      else if (view==='inventory') { btn.textContent='更新库存清单'; btn.onclick=uploadInventory; }
+      else { btn.textContent='保存模型配置'; btn.onclick=saveBudgetSetting; }
+    }
+    function handleRefresh(){ if(window.__activeView==='inventory') loadInventoryStats(); else if(window.__activeView==='budget') loadBudget(); else { opsRefresh(); loadMetrics(); } }
+    function statusClass(status){ if(status==='confirmed') return 'status confirmed'; if(status==='published') return 'status published'; return 'status'; }
+    function sourceTag(x){ return (x.source||'')==='bailian_llm' ? '<span class="chip">百炼AI</span>' : '<span class="chip rule">规则引擎</span>'; }
+    async function uploadInventory(){ const f=document.getElementById('inventoryFile').files[0]; if(!f){alert('请先选择库存Excel');return;} const fd=new FormData(); fd.append('file',f); const role=document.getElementById('defaultRole').value||'addon'; const res=await fetch(`/api/ops/inventory/upload?default_role=${encodeURIComponent(role)}`,{method:'POST',body:fd}); const d=await res.json(); if(!res.ok){alert(d.detail||'上传失败');return;} alert(`库存更新完成：导入${d.imported}个SKU`); await loadInventoryStats(); }
+    async function loadInventoryStats(){ const res=await fetch('/api/ops/library/stats'); const d=await res.json(); document.getElementById('inventoryStats').textContent=`库存清单：总SKU ${d.total}`; }
+    async function loadInventoryList(){
+      const q = encodeURIComponent(document.getElementById('invSearch').value || '');
+      const role = encodeURIComponent(document.getElementById('invRole').value || '');
+      const res = await fetch(`/api/ops/inventory/list?limit=200&offset=0&q=${q}&role=${role}`);
+      const d = await res.json();
+      const tbody = document.getElementById('inventoryTable');
+      tbody.innerHTML = '';
+      d.items.forEach(x => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${x.product_name}</td><td>${x.category}</td><td>${x.role}</td><td>¥${Number(x.original_price).toFixed(2)}</td><td>¥${Number(x.cost).toFixed(2)}</td><td>${(Number(x.gross_margin_rate)*100).toFixed(1)}%</td><td>${x.sku_id}</td>`;
+        tbody.appendChild(tr);
+      });
+    }
+    async function opsUpload(){ const f=document.getElementById('opsFile').files[0]; if(!f){alert('请先选择Excel');return false;} const fd=new FormData(); fd.append('file',f); const res=await fetch('/api/ops/upload-catalog',{method:'POST',body:fd}); const d=await res.json(); if(!res.ok){alert(d.detail||'上传失败');return false;} window.__opsBatchId=d.batch_id; window.__uploadedFilename=f.name; document.getElementById('opsBatch').textContent=`批次：${d.batch_id} ｜ 解析：${d.total_rows} 行`; await opsRefresh(); return true; }
+    async function onOpsFileChange(){ const ok = await opsUpload(); if(ok){ document.getElementById('opsSummary').textContent = '文件已上传，点击“AI智能组货”即可生成。'; } }
+    async function opsGenerate(){
+      const currentFile = document.getElementById('opsFile').files[0];
+      if(!currentFile){alert('请先选择待组货Excel');return;}
+      if(!window.__opsBatchId || window.__uploadedFilename !== currentFile.name){
+        const uploaded = await opsUpload();
+        if(!uploaded) return;
+      }
+      const btns = Array.from(document.querySelectorAll('button'));
+      const generateBtn = btns.find(b => (b.textContent||'').includes('AI智能组货'));
+      const originalText = generateBtn ? generateBtn.textContent : '';
+      if (generateBtn) { generateBtn.textContent = '生成中...'; generateBtn.disabled = true; }
+      try {
+        const topN=Number(document.getElementById('opsTopN').value||300);
+        const sortBy=document.getElementById('opsSortBy').value||'qty';
+        const res=await fetch(`/api/ops/generate-strategies?batch_id=${encodeURIComponent(window.__opsBatchId)}&top_n=${topN}&sort_by=${encodeURIComponent(sortBy)}&candidate_source=library&use_ai=true`,{method:'POST'});
+        const d=await res.json();
+        if(!res.ok){alert(d.detail||'生成失败');return;}
+        const diag = d.diagnostics || {};
+        document.getElementById('opsSummary').textContent=`已生成 ${d.generated_count} 条（AI ${d.ai_generated_count} / 规则 ${d.rule_generated_count}，库存候选 ${diag.candidate_pool_size || 0}，异常跳过 ${diag.skip_exception || 0}）`;
+        await opsRefresh();
+        document.getElementById('opsTable').scrollIntoView({behavior:'smooth', block:'start'});
+      } finally {
+        if (generateBtn) { generateBtn.textContent = originalText || 'AI智能组货'; generateBtn.disabled = false; }
+      }
+    }
+    async function opsRefresh(){ if(!window.__opsBatchId) return; const [s,l]=await Promise.all([fetch(`/api/ops/workbench?batch_id=${encodeURIComponent(window.__opsBatchId)}`),fetch(`/api/ops/strategies?batch_id=${encodeURIComponent(window.__opsBatchId)}`)]); const summary=await s.json(); const list=await l.json(); let top=''; if(summary.top_products&&summary.top_products.length){const p=summary.top_products[0]; top=` ｜ Top1: ${p.product_name}（销量 ${p.total_qty}，GMV ${Number(p.total_gmv||0).toFixed(2)}）`;} document.getElementById('opsSummary').textContent=`商品SKU数 ${summary.sku_count} ｜ 草稿 ${summary.draft} ｜ 已确认 ${summary.confirmed} ｜ 已同步 ${summary.published}${top}`; const tbody=document.getElementById('opsTable'); tbody.innerHTML=''; if(!list.items || !list.items.length){ tbody.innerHTML = `<tr><td colspan="9" style="text-align:center;color:#64748b;padding:18px;">暂无组货结果。请先点击“AI智能组货”，系统会从库存清单里做商品碰撞；若仍为0条，请把截图发我我继续排查。</td></tr>`; return; } list.items.forEach(x=>{const tr=document.createElement('tr'); const reason=(x.decision_payload||'').includes('medical_reason')?'AI医学推理':'规则碰撞推理'; tr.innerHTML=`<td>${x.id}</td><td>${x.main_product_name}<br/><span style="color:#94a3b8;font-size:12px;">${x.main_sku_id}</span></td><td>${x.selected_product_name}<br/><span style="color:#94a3b8;font-size:12px;">${x.selected_sku_id}</span></td><td>${reason}</td><td>${sourceTag(x)}</td><td>¥${Number(x.addon_price).toFixed(2)}</td><td>¥${Number(x.projected_profit).toFixed(2)}</td><td><span class="${statusClass(x.status)}">${x.status}</span></td><td>${x.status==='draft'?`<button class="btn" onclick="opsConfirm(${x.id})">确认</button>`:'-'}</td>`; tbody.appendChild(tr); }); }
+    async function opsConfirm(id){ const res=await fetch(`/api/ops/strategies/${id}/confirm`,{method:'POST'}); const d=await res.json(); if(!res.ok){alert(d.detail||'确认失败');return;} await opsRefresh(); }
+    async function opsSync(){ if(!window.__opsBatchId){alert('请先上传并生成策略');return;} const res=await fetch(`/api/ops/sync?batch_id=${encodeURIComponent(window.__opsBatchId)}`,{method:'POST'}); const d=await res.json(); if(!res.ok){alert(d.detail||'同步失败');return;} alert(`同步完成：${d.synced_count} 条`); await opsRefresh(); await loadMetrics(); }
+    async function loadMetrics(){ const res=await fetch('/api/admin/metrics'); const m=await res.json(); const k=[['请求量',m.total_requests],['AI调用量',m.ai_total_calls],['AI成功率',`${(m.ai_success_rate*100).toFixed(1)}%`],['AI回退率',`${(m.ai_fallback_rate*100).toFixed(1)}%`],['累计Token',m.ai_total_tokens||0],['累计成本(USD)',Number(m.ai_estimated_cost_usd||0).toFixed(6)],['平均预计毛利',`¥${Number(m.avg_projected_profit).toFixed(2)}`],['加购毛利',`¥${Number(m.addon_margin).toFixed(2)}`]]; document.getElementById('metrics').innerHTML=k.map(([a,b])=>`<div class="kpi"><div class="k">${a}</div><div class="v">${b}</div></div>`).join(''); }
+    async function loadAiNotice(){ const res=await fetch('/api/admin/ai-status'); const a=await res.json(); const el=document.getElementById('aiNotice'); if(a.enabled){ el.className='notice ok'; el.textContent=`AI已启用：${a.model}。本次会优先使用AI组货。`; } else { el.className='notice warn'; el.textContent='AI当前未启用，本次会使用规则引擎组货。请在“预算与消耗”确认启用AI组货，并检查启动终端是否设置了百炼API Key。'; } }
+    async function loadBudget(){ const res=await fetch('/api/admin/budget'); const b=await res.json(); document.getElementById('budgetModel').value=b.model||'qwen-plus'; document.getElementById('budgetMonthly').value=b.monthly_budget_usd||50; document.getElementById('budgetInCost').value=b.input_cost_per_1k||0.0012; document.getElementById('budgetOutCost').value=b.output_cost_per_1k||0.0024; document.getElementById('budgetEnabled').checked=!!b.enabled; const cards=[['当前模型',b.model],['累计Token消耗',b.total_tokens],['预计支出(USD)',Number(b.estimated_cost_usd||0).toFixed(6)],['月预算使用率',`${(Number(b.budget_used_rate||0)*100).toFixed(1)}%`]]; document.getElementById('budgetCards').innerHTML=cards.map(([k,v])=>`<div class="kpi"><div class="k">${k}</div><div class="v">${v}</div></div>`).join(''); }
+    async function saveBudgetSetting(){ const body={model:document.getElementById('budgetModel').value,enabled:document.getElementById('budgetEnabled').checked,monthly_budget_usd:Number(document.getElementById('budgetMonthly').value||50),input_cost_per_1k:Number(document.getElementById('budgetInCost').value||0.0012),output_cost_per_1k:Number(document.getElementById('budgetOutCost').value||0.0024)}; const res=await fetch('/api/admin/budget/model',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); const d=await res.json(); if(!res.ok){alert(d.detail||'保存失败');return;} alert('模型与预算配置已保存'); await loadBudget(); }
+    loadMetrics(); loadInventoryStats(); loadInventoryList(); loadBudget(); loadAiNotice();
+  </script>
+</body>
+</html>
