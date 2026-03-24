@@ -37,6 +37,38 @@ uvicorn app.main:app --reload --port 8088
 - 健康检查：`http://127.0.0.1:8088/health`
 - OpenAPI 文档：`http://127.0.0.1:8088/docs`
 
+### 1.3 固定用 8089 + 重启后自动起来（本机 macOS）
+
+日常手动启动（带热重载，端口默认 **8089**）：
+
+```bash
+./scripts/start-dev.sh
+```
+
+需要 **登录后自动监听 8089**（无热重载，进程挂了会自动拉起）时，在仓库根目录执行一次：
+
+```bash
+./scripts/install-login-startup.sh
+```
+
+卸载自启动：`./scripts/uninstall-login-startup.sh`。日志目录：`.logs/`（已加入 `.gitignore`）。
+
+### 1.4 同一局域网内给其他同事访问（macOS）
+
+要点：**不能用只监听本机的地址**。需 `--host 0.0.0.0`，同事浏览器里用「你这台电脑的局域网 IP + 端口」。
+
+一键启动（默认 **8089**，并打印本机推测的局域网 IP）：
+
+```bash
+./scripts/start-lan.sh
+```
+
+同事打开终端里提示的 **`http://<你的局域网IP>:8089/admin`** 即可（需与你在**同一 Wi‑Fi 或同一有线网段**；公司 VPN 有时会隔离，需以实际网络为准）。
+
+若本机开了 **macOS 防火墙**（系统设置 → 网络 → 防火墙），首次可能被拦截，需在弹出框中允许 **Python** 入站，或为测试暂时关闭防火墙（遵守公司安全规定）。
+
+**安全提示**：当前 MVP 后台与接口多为**内网演示**场景；暴露到局域网意味着同网段的人可访问，请勿在公网裸奔。更正式的对外发布见仓库根目录 `DEPLOY.md`（Nginx、HTTPS 等）。
+
 ---
 
 ## 2. 项目目录结构
@@ -49,7 +81,11 @@ zhinengzuhuo-backup/
 │   ├── ai_brain.py              # LLM 调用封装（百炼）
 │   └── templates/admin.html     # 运营后台页面
 ├── scripts/
-│   └── import_sales_catalog.py  # 商品清单导入脚本
+│   ├── start-dev.sh                 # 本机开发启动（默认 8089，仅 127.0.0.1）
+│   ├── start-lan.sh                 # 局域网可访问（0.0.0.0:8089）
+│   ├── install-login-startup.sh     # macOS 登录自启动（8089）
+│   ├── uninstall-login-startup.sh
+│   └── import_sales_catalog.py      # 商品清单导入脚本
 ├── requirements.txt
 └── README.md
 ```

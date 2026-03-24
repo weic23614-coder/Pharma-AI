@@ -56,7 +56,7 @@ class RecommendRequest(BaseModel):
 
 
 def _resolve_item_code(cur: sqlite3.Cursor, sku_id: str) -> str:
-    """商品编码：优先库存表 item_code，其次 product_code，否则 sku_id。"""
+    """对外展示「商品编码」列：优先库存表 item_code，其次主码(product_code)，否则 sku_id。"""
     if not sku_id:
         return ""
     row = cur.execute(
@@ -1324,7 +1324,8 @@ async def ops_upload_catalog(file: UploadFile = File(...)) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail="缺少 openpyxl 依赖") from exc
 
     content = await file.read()
-    wb = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    # 不用 read_only：部分 BI/药网导出表在 read_only 下会错误只解析出首列，导致缺列误报
+    wb = load_workbook(io.BytesIO(content), read_only=False, data_only=True)
     ws = wb[wb.sheetnames[0]]
     row_iter = ws.iter_rows(values_only=True)
     header_row = next(row_iter, None)
@@ -1346,7 +1347,11 @@ async def ops_upload_catalog(file: UploadFile = File(...)) -> dict[str, Any]:
     if name_idx is None:
         missing.append("商品名称")
     if missing:
-        raise HTTPException(status_code=400, detail=f"缺少关键字段: {', '.join(missing)}")
+        head_preview = "、".join(h for h in headers[:30] if h) or "(空)"
+        raise HTTPException(
+            status_code=400,
+            detail=f"缺少关键字段: {', '.join(missing)}。当前表头前若干列：{head_preview}",
+        )
 
     batch_id = f"batch_{uuid.uuid4().hex[:10]}"
     now = now_iso()
@@ -1416,7 +1421,7 @@ async def ops_upload_library(
     except Exception as exc:
         raise HTTPException(status_code=500, detail="缺少 openpyxl 依赖") from exc
     content = await file.read()
-    wb = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    wb = load_workbook(io.BytesIO(content), read_only=False, data_only=True)
     ws = wb[wb.sheetnames[0]]
     rows = list(ws.iter_rows(values_only=True))
     if not rows:
@@ -1424,7 +1429,7 @@ async def ops_upload_library(
     headers = [str(x).strip() if x is not None else "" for x in rows[0]]
     sku_idx = find_col_idx(headers, {"sku", "sku_id", "商品编码", "商品sku", "商品id", "货号"})
     name_idx = find_col_idx(headers, {"商品名称", "产品名称", "药品名称", "名称", "商品名", "通用名"})
-    product_code_idx = find_col_idx(headers, {"产品编码", "药网编码", "产品id"})
+    product_code_idx = find_col_idx(headers, {"主码", "标品主码", "产品编码", "药网编码", "产品id"})
     manufacturer_idx = find_col_idx(headers, {"生产厂商", "厂商", "厂家"})
     department_idx = find_col_idx(headers, {"科室"})
     item_code_idx = find_col_idx(headers, {"商品编码"})
@@ -1436,7 +1441,15 @@ async def ops_upload_library(
     if sku_idx is None:
         sku_idx = item_code_idx
     if sku_idx is None or name_idx is None:
-        raise HTTPException(status_code=400, detail="缺少关键字段: 商品编码(或SKU)/产品名称")
+        head_preview = "、".join(h for h in headers[:30] if h) or "(空)"
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "缺少关键字段：需要「商品编码（或 SKU）」与「产品名称」。"
+                "主码列可选，支持表头：主码、标品主码、产品编码等。"
+                f"当前识别到的表头：{head_preview}"
+            ),
+        )
     now = now_iso()
     upserts = []
     for row in rows[1:]:
@@ -1537,9 +1550,12 @@ def ops_inventory_list(
     where = ["active=1"]
     params: list[Any] = []
     if q:
-        where.append("(sku_id LIKE ? OR product_name LIKE ? OR category LIKE ?)")
+        where.append(
+            "(sku_id LIKE ? OR product_name LIKE ? OR category LIKE ? "
+            "OR COALESCE(product_code, '') LIKE ? OR COALESCE(item_code, '') LIKE ?)"
+        )
         like = f"%{q}%"
-        params.extend([like, like, like])
+        params.extend([like, like, like, like, like])
     if role in {"main", "addon"}:
         where.append("role=?")
         params.append(role)

@@ -68,7 +68,7 @@
           <div class="pipeline">
             <div class="field"><label>上传库存清单（全量SKU）</label><input id="inventoryFile" type="file" accept=".xlsx,.xlsm,.xltx,.xltm" /></div>
             <div class="field"><label>默认角色</label><select id="defaultRole"><option value="addon">通用商品</option><option value="main">通用商品</option></select></div>
-            <div class="field"><label>说明</label><input value="库存清单就是商品库唯一维护入口" disabled /></div>
+            <div class="field"><label>说明</label><input value="主码列可为「主码」或「产品编码」；重新上传全量清单将按 sku 覆盖更新" disabled /></div>
             <div class="inline-actions"><button class="btn primary" onclick="uploadInventory()">更新库存清单</button></div>
           </div>
           <div id="inventoryStats" class="summary">库存：-</div>
@@ -81,7 +81,7 @@
             <div class="inline-actions"><button class="btn" onclick="loadInventoryList()">查询</button></div>
           </div>
           <table style="margin-top:8px;">
-            <thead><tr><th class="seq-cell">序号</th><th>科室</th><th>产品编码</th><th>商品编码</th><th>一级类目</th><th>产品名称</th><th>生产厂家</th></tr></thead>
+            <thead><tr><th class="seq-cell">序号</th><th>科室</th><th>主码</th><th>商品编码</th><th>一级类目</th><th>产品名称</th><th>生产厂家</th></tr></thead>
             <tbody id="inventoryTable"></tbody>
           </table>
           <div class="pager">
