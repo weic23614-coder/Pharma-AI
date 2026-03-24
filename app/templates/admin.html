@@ -33,13 +33,16 @@
     .kpi-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin-top:8px; }
     .kpi { border:1px solid var(--line); background:#fff; border-radius:12px; padding:10px; }
     .kpi .k { color:var(--muted); font-size:12px; } .kpi .v { margin-top:4px; font-size:20px; font-weight:700; }
-    .section-title { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; font-weight:700; }
+    .section-title { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; font-weight:700; width:100%; }
     table { width:100%; border-collapse:collapse; } th, td { border-bottom:1px solid #eff3f8; padding:10px 8px; font-size:13px; text-align:left; } th { color:#64748b; font-weight:600; background:#fafcff; }
     .chip { display:inline-block; border:1px solid #d6e6ff; color:var(--brand); background:var(--brand-weak); border-radius:999px; padding:2px 8px; font-size:12px; }
     .chip.rule { border-color:#d9e2ec; color:#475569; background:#f8fafc; }
     .status { font-size:12px; border-radius:999px; padding:3px 8px; border:1px solid #dce3ef; color:#334155; background:#f8fbff; }
     .status.confirmed { color:var(--ok); border-color:#b7ebc9; background:#effdf4; } .status.published { color:#14532d; border-color:#86efac; background:#dcfce7; }
     .inline-actions { display:flex; gap:8px; }
+    .pager { display:flex; justify-content:flex-end; gap:8px; align-items:center; margin-top:10px; color:#64748b; font-size:12px; }
+    .seq-cell { text-align:center; color:#64748b; width:52px; }
+    .selling-point { font-size:13px; line-height:1.45; color:#334155; white-space:pre-wrap; word-break:break-word; max-width:320px; }
     .view { display:none; } .view.active { display:block; }
   </style>
 </head>
@@ -78,9 +81,14 @@
             <div class="inline-actions"><button class="btn" onclick="loadInventoryList()">查询</button></div>
           </div>
           <table style="margin-top:8px;">
-            <thead><tr><th>商品名称</th><th>类目</th><th>角色</th><th>价格</th><th>成本</th><th>毛利率</th><th>SKU</th></tr></thead>
+            <thead><tr><th class="seq-cell">序号</th><th>科室</th><th>产品编码</th><th>商品编码</th><th>一级类目</th><th>产品名称</th><th>生产厂家</th></tr></thead>
             <tbody id="inventoryTable"></tbody>
           </table>
+          <div class="pager">
+            <button class="btn" id="invPrevBtn" onclick="prevInventoryPage()">上一页</button>
+            <span id="invPageInfo">第 1 页</span>
+            <button class="btn" id="invNextBtn" onclick="nextInventoryPage()">下一页</button>
+          </div>
         </section>
       </section>
 
@@ -90,15 +98,26 @@
             <div class="field"><label>上传待组货商品（Excel）</label><input id="opsFile" type="file" accept=".xlsx,.xlsm,.xltx,.xltm" onchange="onOpsFileChange()" /></div>
             <div class="field"><label>生成范围 Top N</label><input id="opsTopN" type="number" value="300" min="1" max="5000" /></div>
             <div class="field"><label>排序依据</label><select id="opsSortBy"><option value="qty">按销量优先</option><option value="gmv">按GMV优先</option></select></div>
-            <div class="inline-actions"><button class="btn primary" onclick="opsGenerate()">AI智能组货</button></div>
+            <div class="inline-actions" style="flex-direction:column;align-items:stretch;gap:8px;">
+              <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#475569;cursor:pointer;user-select:none;">
+                <input type="checkbox" id="opsUseAi" />
+                启用百炼 AI 逐条推理（很慢；首期建议<strong>不勾选</strong>，先用规则快速出合理组货）
+              </label>
+              <button type="button" id="opsGenerateBtn" class="btn primary" onclick="opsGenerate()">生成组货方案</button>
+            </div>
           </div>
           <div id="opsBatch" class="summary">尚未上传批次。</div>
           <div id="opsSummary" class="summary">等待生成策略。</div>
         </section>
         <section class="panel"><div class="section-title">AI 运营监控</div><div id="metrics" class="kpi-grid"></div></section>
         <section class="panel">
-          <div class="section-title">组货方案（待确认/已确认）</div>
-          <table><thead><tr><th>ID</th><th>商品A</th><th>建议搭配商品B</th><th>组货原因</th><th>来源</th><th>换购价</th><th>预计毛利</th><th>状态</th><th>操作</th></tr></thead><tbody id="opsTable"></tbody></table>
+          <div class="section-title" style="flex-wrap:wrap;gap:8px;">组货方案（待确认/已确认）<button type="button" class="btn primary" style="margin-left:auto;" onclick="opsExportCsv()">导出当前批次 CSV</button></div>
+          <table><thead><tr><th>ID</th><th>套餐名称</th><th>商品A</th><th>建议搭配商品B</th><th>组货卖点（C端一句话）</th><th>组货原因</th><th>来源</th><th>商品价格(原价)</th><th>参考毛利</th><th>状态</th><th>操作</th></tr></thead><tbody id="opsTable"></tbody></table>
+          <div class="pager">
+            <button class="btn" id="opsPrevBtn" onclick="prevOpsPage()">上一页</button>
+            <span id="opsPageInfo">第 1 页</span>
+            <button class="btn" id="opsNextBtn" onclick="nextOpsPage()">下一页</button>
+          </div>
         </section>
       </section>
 
@@ -108,6 +127,9 @@
           <div class="section-title">模型与预算配置</div>
           <div class="pipeline">
             <div class="field"><label>模型</label><select id="budgetModel"><option value="qwen-plus">qwen-plus</option><option value="qwen-turbo">qwen-turbo</option><option value="qwen-max">qwen-max</option></select></div>
+            <div class="field"><label>百炼 API Key</label><input id="budgetApiKey" type="password" placeholder="sk-xxx（保存后即时生效）" /></div>
+            <div class="field"><label>Base URL</label><input id="budgetBaseUrl" value="https://dashscope.aliyuncs.com/compatible-mode/v1" /></div>
+            <div class="field"><label>超时(秒)</label><input id="budgetTimeout" type="number" step="0.1" min="0.5" value="1.2" /></div>
             <div class="field"><label>月预算(USD)</label><input id="budgetMonthly" type="number" step="0.01" value="50" /></div>
             <div class="field"><label>输入成本/1K token</label><input id="budgetInCost" type="number" step="0.0001" value="0.0012" /></div>
             <div class="field"><label>输出成本/1K token</label><input id="budgetOutCost" type="number" step="0.0001" value="0.0024" /></div>
@@ -119,6 +141,8 @@
   </div>
   <script>
     window.__opsBatchId = null; window.__activeView = 'bundle';
+    window.__invPage = 1; window.__invPageSize = 50; window.__invTotal = 0;
+    window.__opsPage = 1; window.__opsPageSize = 50; window.__opsTotal = 0;
     function switchView(view) {
       window.__activeView = view;
       ['inventory','bundle','budget'].forEach(v => { document.getElementById(`view-${v}`).classList.toggle('active', v===view); document.getElementById(`menu-${v}`).classList.toggle('active', v===view); });
@@ -132,56 +156,197 @@
     function handleRefresh(){ if(window.__activeView==='inventory') loadInventoryStats(); else if(window.__activeView==='budget') loadBudget(); else { opsRefresh(); loadMetrics(); } }
     function statusClass(status){ if(status==='confirmed') return 'status confirmed'; if(status==='published') return 'status published'; return 'status'; }
     function sourceTag(x){ return (x.source||'')==='bailian_llm' ? '<span class="chip">百炼AI</span>' : '<span class="chip rule">规则引擎</span>'; }
+    function escapeHtml(s){
+      if (s == null || s === '') return '';
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+    function copySellingPointPrev(btn){
+      const box = btn.previousElementSibling;
+      const t = (box && box.textContent) ? box.textContent.trim() : '';
+      if (!t || t === '—') { alert('暂无可复制文案'); return; }
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(t).then(()=>alert('卖点已复制到剪贴板，可直接粘贴到前端')).catch(()=>{ prompt('请手动复制：', t); });
+      } else {
+        prompt('请手动复制：', t);
+      }
+    }
     async function uploadInventory(){ const f=document.getElementById('inventoryFile').files[0]; if(!f){alert('请先选择库存Excel');return;} const fd=new FormData(); fd.append('file',f); const role=document.getElementById('defaultRole').value||'addon'; const res=await fetch(`/api/ops/inventory/upload?default_role=${encodeURIComponent(role)}`,{method:'POST',body:fd}); const d=await res.json(); if(!res.ok){alert(d.detail||'上传失败');return;} alert(`库存更新完成：导入${d.imported}个SKU`); await loadInventoryStats(); }
     async function loadInventoryStats(){ const res=await fetch('/api/ops/library/stats'); const d=await res.json(); document.getElementById('inventoryStats').textContent=`库存清单：总SKU ${d.total}`; }
-    async function loadInventoryList(){
+    function updateInvPager(){
+      const totalPage = Math.max(1, Math.ceil((window.__invTotal || 0) / window.__invPageSize));
+      document.getElementById('invPageInfo').textContent = `第 ${window.__invPage} / ${totalPage} 页（共 ${window.__invTotal} 条）`;
+      document.getElementById('invPrevBtn').disabled = window.__invPage <= 1;
+      document.getElementById('invNextBtn').disabled = window.__invPage >= totalPage;
+    }
+    async function loadInventoryList(page = 1){
+      window.__invPage = page;
+      const offset = (window.__invPage - 1) * window.__invPageSize;
       const q = encodeURIComponent(document.getElementById('invSearch').value || '');
       const role = encodeURIComponent(document.getElementById('invRole').value || '');
-      const res = await fetch(`/api/ops/inventory/list?limit=200&offset=0&q=${q}&role=${role}`);
+      const res = await fetch(`/api/ops/inventory/list?limit=${window.__invPageSize}&offset=${offset}&q=${q}&role=${role}`);
       const d = await res.json();
+      window.__invTotal = Number(d.total || 0);
       const tbody = document.getElementById('inventoryTable');
       tbody.innerHTML = '';
-      d.items.forEach(x => {
+      d.items.forEach((x, idx) => {
+        const seq = offset + idx + 1;
         const tr = document.createElement('tr');
-        tr.innerHTML = `<td>${x.product_name}</td><td>${x.category}</td><td>${x.role}</td><td>¥${Number(x.original_price).toFixed(2)}</td><td>¥${Number(x.cost).toFixed(2)}</td><td>${(Number(x.gross_margin_rate)*100).toFixed(1)}%</td><td>${x.sku_id}</td>`;
+        tr.innerHTML = `<td class="seq-cell">${seq}</td><td>${escapeHtml(x.department || '-')}</td><td>${escapeHtml(x.product_code || '-')}</td><td>${escapeHtml(x.item_code || x.sku_id || '-')}</td><td>${escapeHtml(x.level1_category || x.category || '-')}</td><td>${escapeHtml(x.product_name || '-')}</td><td>${escapeHtml(x.manufacturer || '-')}</td>`;
         tbody.appendChild(tr);
       });
+      updateInvPager();
     }
-    async function opsUpload(){ const f=document.getElementById('opsFile').files[0]; if(!f){alert('请先选择Excel');return false;} const fd=new FormData(); fd.append('file',f); const res=await fetch('/api/ops/upload-catalog',{method:'POST',body:fd}); const d=await res.json(); if(!res.ok){alert(d.detail||'上传失败');return false;} window.__opsBatchId=d.batch_id; window.__uploadedFilename=f.name; document.getElementById('opsBatch').textContent=`批次：${d.batch_id} ｜ 解析：${d.total_rows} 行`; await opsRefresh(); return true; }
-    async function onOpsFileChange(){ const ok = await opsUpload(); if(ok){ document.getElementById('opsSummary').textContent = '文件已上传，点击“AI智能组货”即可生成。'; } }
+    function prevInventoryPage(){ if(window.__invPage > 1) loadInventoryList(window.__invPage - 1); }
+    function nextInventoryPage(){ const totalPage = Math.max(1, Math.ceil((window.__invTotal || 0) / window.__invPageSize)); if(window.__invPage < totalPage) loadInventoryList(window.__invPage + 1); }
+    async function postJSONWithTimeout(url, options = {}, timeoutMs = 45000) {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+      try {
+        const res = await fetch(url, { ...options, signal: ctrl.signal });
+        const text = await res.text();
+        let data = {};
+        try { data = text ? JSON.parse(text) : {}; } catch(e) { data = { detail: text || '返回不是JSON' }; }
+        return { res, data };
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    async function opsUpload(){
+      const f=document.getElementById('opsFile').files[0];
+      if(!f){alert('请先选择Excel');return false;}
+      document.getElementById('opsSummary').textContent = '正在上传文件，请稍候...';
+      const fd=new FormData(); fd.append('file',f);
+      try {
+        const { res, data } = await postJSONWithTimeout(`${window.location.origin}/api/ops/upload-catalog`, { method:'POST', body:fd }, 60000);
+        if(!res.ok){ alert(data.detail || `上传失败（HTTP ${res.status}）`); document.getElementById('opsSummary').textContent = '上传失败，请重试。'; return false; }
+        window.__opsBatchId=data.batch_id; window.__uploadedFilename=f.name;
+        persistOpsBatch();
+        document.getElementById('opsBatch').textContent=`批次：${data.batch_id} ｜ 解析：${data.total_rows} 行`;
+        document.getElementById('opsSummary').textContent = '上传完成，开始生成策略...';
+        await opsRefresh();
+        return true;
+      } catch (e) {
+        const msg = (e && e.name === 'AbortError') ? '上传超时（60秒），请换小文件先验证' : `上传异常：${e.message || e}`;
+        alert(msg);
+        document.getElementById('opsSummary').textContent = msg;
+        return false;
+      }
+    }
+    async function onOpsFileChange(){ const ok = await opsUpload(); if(ok){ document.getElementById('opsSummary').textContent = '文件已上传，点击「生成组货方案」即可（默认规则引擎，速度快）。'; } }
+    function persistOpsBatch(){
+      try {
+        if (window.__opsBatchId) sessionStorage.setItem('ops_batch_id', window.__opsBatchId);
+        else sessionStorage.removeItem('ops_batch_id');
+        if (window.__uploadedFilename) sessionStorage.setItem('ops_uploaded_filename', window.__uploadedFilename);
+        else sessionStorage.removeItem('ops_uploaded_filename');
+      } catch (e) { /* ignore */ }
+    }
+    function restoreOpsBatchFromStorage(){
+      try {
+        const bid = sessionStorage.getItem('ops_batch_id');
+        const fn = sessionStorage.getItem('ops_uploaded_filename');
+        if (bid) {
+          window.__opsBatchId = bid;
+          window.__uploadedFilename = fn || '';
+          const el = document.getElementById('opsBatch');
+          if (el) el.textContent = `批次：${bid}（已从本页缓存恢复）${fn ? ' ｜ 上次文件：' + fn : ''}`;
+        }
+      } catch (e) { /* ignore */ }
+    }
     async function opsGenerate(){
       const currentFile = document.getElementById('opsFile').files[0];
-      if(!currentFile){alert('请先选择待组货Excel');return;}
-      if(!window.__opsBatchId || window.__uploadedFilename !== currentFile.name){
+      const useAi = !!(document.getElementById('opsUseAi') && document.getElementById('opsUseAi').checked);
+      document.getElementById('opsSummary').textContent = useAi
+        ? '正在调用百炼 AI 批量组货（可能需数分钟，请勿关闭页面）...'
+        : '正在用规则引擎生成组货，请稍候...';
+      if (!window.__opsBatchId) {
+        if (!currentFile) {
+          alert('请先选择待组货 Excel 并等待上传完成；若刚刷新过页面，请重新选择同一文件以恢复批次。');
+          document.getElementById('opsSummary').textContent = '等待生成策略。';
+          return;
+        }
         const uploaded = await opsUpload();
-        if(!uploaded) return;
+        if (!uploaded) return;
+      } else if (currentFile && window.__uploadedFilename !== currentFile.name) {
+        const uploaded = await opsUpload();
+        if (!uploaded) return;
       }
-      const btns = Array.from(document.querySelectorAll('button'));
-      const generateBtn = btns.find(b => (b.textContent||'').includes('AI智能组货'));
+      const generateBtn = document.getElementById('opsGenerateBtn');
       const originalText = generateBtn ? generateBtn.textContent : '';
       if (generateBtn) { generateBtn.textContent = '生成中...'; generateBtn.disabled = true; }
       try {
         const topN=Number(document.getElementById('opsTopN').value||300);
         const sortBy=document.getElementById('opsSortBy').value||'qty';
-        const res=await fetch(`/api/ops/generate-strategies?batch_id=${encodeURIComponent(window.__opsBatchId)}&top_n=${topN}&sort_by=${encodeURIComponent(sortBy)}&candidate_source=library&use_ai=true`,{method:'POST'});
-        const d=await res.json();
-        if(!res.ok){alert(d.detail||'生成失败');return;}
+        const timeoutMs = useAi ? 600000 : 180000;
+        const useAiStr = useAi ? 'true' : 'false';
+        const { res, data:d } = await postJSONWithTimeout(
+          `${window.location.origin}/api/ops/generate-strategies?batch_id=${encodeURIComponent(window.__opsBatchId)}&top_n=${topN}&sort_by=${encodeURIComponent(sortBy)}&candidate_source=library&use_ai=${useAiStr}`,
+          { method:'POST' },
+          timeoutMs
+        );
+        if(!res.ok){alert(d.detail||`生成失败（HTTP ${res.status}）`);return;}
         const diag = d.diagnostics || {};
         document.getElementById('opsSummary').textContent=`已生成 ${d.generated_count} 条（AI ${d.ai_generated_count} / 规则 ${d.rule_generated_count}，库存候选 ${diag.candidate_pool_size || 0}，异常跳过 ${diag.skip_exception || 0}）`;
-        await opsRefresh();
+        window.__opsPage = 1;
+        await opsRefresh(1);
         document.getElementById('opsTable').scrollIntoView({behavior:'smooth', block:'start'});
+      } catch (e) {
+        const msg = (e && e.name === 'AbortError')
+          ? (useAi ? '生成超时（10分钟）。请取消「启用百炼 AI」仅用规则，或把 Top N 调到 50 以下再试。' : '生成超时（3分钟）。请把 Top N 调小或检查服务是否卡住。')
+          : `生成异常：${e.message || e}`;
+        alert(msg);
+        document.getElementById('opsSummary').textContent = msg;
       } finally {
-        if (generateBtn) { generateBtn.textContent = originalText || 'AI智能组货'; generateBtn.disabled = false; }
+        if (generateBtn) { generateBtn.textContent = originalText || '生成组货方案'; generateBtn.disabled = false; }
       }
     }
-    async function opsRefresh(){ if(!window.__opsBatchId) return; const [s,l]=await Promise.all([fetch(`/api/ops/workbench?batch_id=${encodeURIComponent(window.__opsBatchId)}`),fetch(`/api/ops/strategies?batch_id=${encodeURIComponent(window.__opsBatchId)}`)]); const summary=await s.json(); const list=await l.json(); let top=''; if(summary.top_products&&summary.top_products.length){const p=summary.top_products[0]; top=` ｜ Top1: ${p.product_name}（销量 ${p.total_qty}，GMV ${Number(p.total_gmv||0).toFixed(2)}）`;} document.getElementById('opsSummary').textContent=`商品SKU数 ${summary.sku_count} ｜ 草稿 ${summary.draft} ｜ 已确认 ${summary.confirmed} ｜ 已同步 ${summary.published}${top}`; const tbody=document.getElementById('opsTable'); tbody.innerHTML=''; if(!list.items || !list.items.length){ tbody.innerHTML = `<tr><td colspan="9" style="text-align:center;color:#64748b;padding:18px;">暂无组货结果。请先点击“AI智能组货”，系统会从库存清单里做商品碰撞；若仍为0条，请把截图发我我继续排查。</td></tr>`; return; } list.items.forEach(x=>{const tr=document.createElement('tr'); const reason=(x.decision_payload||'').includes('medical_reason')?'AI医学推理':'规则碰撞推理'; tr.innerHTML=`<td>${x.id}</td><td>${x.main_product_name}<br/><span style="color:#94a3b8;font-size:12px;">${x.main_sku_id}</span></td><td>${x.selected_product_name}<br/><span style="color:#94a3b8;font-size:12px;">${x.selected_sku_id}</span></td><td>${reason}</td><td>${sourceTag(x)}</td><td>¥${Number(x.addon_price).toFixed(2)}</td><td>¥${Number(x.projected_profit).toFixed(2)}</td><td><span class="${statusClass(x.status)}">${x.status}</span></td><td>${x.status==='draft'?`<button class="btn" onclick="opsConfirm(${x.id})">确认</button>`:'-'}</td>`; tbody.appendChild(tr); }); }
+    function updateOpsPager(){
+      const totalPage = Math.max(1, Math.ceil((window.__opsTotal || 0) / window.__opsPageSize));
+      document.getElementById('opsPageInfo').textContent = `第 ${window.__opsPage} / ${totalPage} 页（共 ${window.__opsTotal} 条）`;
+      document.getElementById('opsPrevBtn').disabled = window.__opsPage <= 1;
+      document.getElementById('opsNextBtn').disabled = window.__opsPage >= totalPage;
+    }
+    async function opsRefresh(page = window.__opsPage){
+      if(!window.__opsBatchId) return;
+      window.__opsPage = page;
+      const offset = (window.__opsPage - 1) * window.__opsPageSize;
+      const [s,l]=await Promise.all([
+        fetch(`/api/ops/workbench?batch_id=${encodeURIComponent(window.__opsBatchId)}`),
+        fetch(`/api/ops/strategies?batch_id=${encodeURIComponent(window.__opsBatchId)}&limit=${window.__opsPageSize}&offset=${offset}`)
+      ]);
+      const summary=await s.json(); const list=await l.json();
+      window.__opsTotal = Number(list.total || 0);
+      let top=''; if(summary.top_products&&summary.top_products.length){const p=summary.top_products[0]; top=` ｜ Top1: ${p.product_name}（销量 ${p.total_qty}，GMV ${Number(p.total_gmv||0).toFixed(2)}）`;}
+      document.getElementById('opsSummary').textContent=`商品SKU数 ${summary.sku_count} ｜ 草稿 ${summary.draft} ｜ 已确认 ${summary.confirmed} ｜ 已同步 ${summary.published}${top}`;
+      const tbody=document.getElementById('opsTable'); tbody.innerHTML='';
+      if(!list.items || !list.items.length){ tbody.innerHTML = `<tr><td colspan="11" style="text-align:center;color:#64748b;padding:18px;">暂无组货结果。请先点击「生成组货方案」（默认规则引擎）；若仍为 0 条，请确认已上传<strong>库存清单</strong>且待组货 Excel 有 SKU。若勾选 AI 仍无结果，可先取消 AI 验证规则链路。</td></tr>`; updateOpsPager(); return; }
+      list.items.forEach(x=>{
+        const tr=document.createElement('tr');
+        let reason='规则关联推理';
+        try{ const p=JSON.parse(x.decision_payload||'{}'); const t=(p.decision_trace||{}); if((x.decision_payload||'').includes('medical_reason')) reason='AI医学推理'; else if(Array.isArray(t.association_tags) && t.association_tags.length) reason=t.association_tags.slice(0,2).join(' / ');}catch(e){}
+        const selling = (x.sales_copy && String(x.sales_copy).trim()) ? escapeHtml(x.sales_copy.trim()) : '—';
+        const pkg = escapeHtml((x.package_name && String(x.package_name).trim()) ? x.package_name : '—');
+        tr.innerHTML=`<td>${x.id}</td><td style="max-width:120px;font-weight:600;color:#1e293b;">${pkg}</td><td>${escapeHtml(x.main_product_name)}<br/><span style="color:#94a3b8;font-size:12px;">${escapeHtml(x.main_sku_id)}</span></td><td>${escapeHtml(x.selected_product_name)}<br/><span style="color:#94a3b8;font-size:12px;">${escapeHtml(x.selected_sku_id)}</span></td><td style="vertical-align:top;"><div class="selling-point">${selling}</div><button type="button" class="btn" style="font-size:11px;padding:4px 10px;margin-top:6px;" onclick="copySellingPointPrev(this)">复制卖点</button></td><td>${escapeHtml(reason)}</td><td>${sourceTag(x)}</td><td>¥${Number(x.addon_price).toFixed(2)}</td><td>¥${Number(x.projected_profit).toFixed(2)}</td><td><span class="${statusClass(x.status)}">${x.status}</span></td><td>${x.status==='draft'?`<button class="btn" onclick="opsConfirm(${x.id})">确认</button>`:'-'}</td>`;
+        tbody.appendChild(tr);
+      });
+      updateOpsPager();
+    }
+    function opsExportCsv(){
+      if(!window.__opsBatchId){ alert('请先上传待组货并生成方案'); return; }
+      window.location.href = `${window.location.origin}/api/ops/strategies/export?batch_id=${encodeURIComponent(window.__opsBatchId)}`;
+    }
+    function prevOpsPage(){ if(window.__opsPage > 1) opsRefresh(window.__opsPage - 1); }
+    function nextOpsPage(){ const totalPage = Math.max(1, Math.ceil((window.__opsTotal || 0) / window.__opsPageSize)); if(window.__opsPage < totalPage) opsRefresh(window.__opsPage + 1); }
     async function opsConfirm(id){ const res=await fetch(`/api/ops/strategies/${id}/confirm`,{method:'POST'}); const d=await res.json(); if(!res.ok){alert(d.detail||'确认失败');return;} await opsRefresh(); }
     async function opsSync(){ if(!window.__opsBatchId){alert('请先上传并生成策略');return;} const res=await fetch(`/api/ops/sync?batch_id=${encodeURIComponent(window.__opsBatchId)}`,{method:'POST'}); const d=await res.json(); if(!res.ok){alert(d.detail||'同步失败');return;} alert(`同步完成：${d.synced_count} 条`); await opsRefresh(); await loadMetrics(); }
-    async function loadMetrics(){ const res=await fetch('/api/admin/metrics'); const m=await res.json(); const k=[['请求量',m.total_requests],['AI调用量',m.ai_total_calls],['AI成功率',`${(m.ai_success_rate*100).toFixed(1)}%`],['AI回退率',`${(m.ai_fallback_rate*100).toFixed(1)}%`],['累计Token',m.ai_total_tokens||0],['累计成本(USD)',Number(m.ai_estimated_cost_usd||0).toFixed(6)],['平均预计毛利',`¥${Number(m.avg_projected_profit).toFixed(2)}`],['加购毛利',`¥${Number(m.addon_margin).toFixed(2)}`]]; document.getElementById('metrics').innerHTML=k.map(([a,b])=>`<div class="kpi"><div class="k">${a}</div><div class="v">${b}</div></div>`).join(''); }
-    async function loadAiNotice(){ const res=await fetch('/api/admin/ai-status'); const a=await res.json(); const el=document.getElementById('aiNotice'); if(a.enabled){ el.className='notice ok'; el.textContent=`AI已启用：${a.model}。本次会优先使用AI组货。`; } else { el.className='notice warn'; el.textContent='AI当前未启用，本次会使用规则引擎组货。请在“预算与消耗”确认启用AI组货，并检查启动终端是否设置了百炼API Key。'; } }
-    async function loadBudget(){ const res=await fetch('/api/admin/budget'); const b=await res.json(); document.getElementById('budgetModel').value=b.model||'qwen-plus'; document.getElementById('budgetMonthly').value=b.monthly_budget_usd||50; document.getElementById('budgetInCost').value=b.input_cost_per_1k||0.0012; document.getElementById('budgetOutCost').value=b.output_cost_per_1k||0.0024; document.getElementById('budgetEnabled').checked=!!b.enabled; const cards=[['当前模型',b.model],['累计Token消耗',b.total_tokens],['预计支出(USD)',Number(b.estimated_cost_usd||0).toFixed(6)],['月预算使用率',`${(Number(b.budget_used_rate||0)*100).toFixed(1)}%`]]; document.getElementById('budgetCards').innerHTML=cards.map(([k,v])=>`<div class="kpi"><div class="k">${k}</div><div class="v">${v}</div></div>`).join(''); }
-    async function saveBudgetSetting(){ const body={model:document.getElementById('budgetModel').value,enabled:document.getElementById('budgetEnabled').checked,monthly_budget_usd:Number(document.getElementById('budgetMonthly').value||50),input_cost_per_1k:Number(document.getElementById('budgetInCost').value||0.0012),output_cost_per_1k:Number(document.getElementById('budgetOutCost').value||0.0024)}; const res=await fetch('/api/admin/budget/model',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); const d=await res.json(); if(!res.ok){alert(d.detail||'保存失败');return;} alert('模型与预算配置已保存'); await loadBudget(); }
+    async function loadMetrics(){ const res=await fetch('/api/admin/metrics'); const m=await res.json(); const k=[['请求量',m.total_requests],['AI调用量',m.ai_total_calls],['AI成功率',`${(m.ai_success_rate*100).toFixed(1)}%`],['AI回退率',`${(m.ai_fallback_rate*100).toFixed(1)}%`],['累计Token',m.ai_total_tokens||0],['累计成本(USD)',Number(m.ai_estimated_cost_usd||0).toFixed(6)],['平均参考毛利',`¥${Number(m.avg_projected_profit).toFixed(2)}`],['加购毛利',`¥${Number(m.addon_margin).toFixed(2)}`]]; document.getElementById('metrics').innerHTML=k.map(([a,b])=>`<div class="kpi"><div class="k">${a}</div><div class="v">${b}</div></div>`).join(''); }
+    async function loadAiNotice(){ const res=await fetch('/api/admin/ai-status'); const a=await res.json(); const el=document.getElementById('aiNotice'); if(a.enabled){ el.className='notice ok'; el.textContent=`AI已启用：${a.model}。本次会优先使用AI组货。`; } else { el.className='notice warn'; el.textContent=`AI当前未启用，本次会使用规则引擎组货。请在“预算与消耗”配置并启用 API Key。`; } }
+    async function loadBudget(){ const res=await fetch('/api/admin/budget'); const b=await res.json(); document.getElementById('budgetModel').value=b.model||'qwen-plus'; document.getElementById('budgetMonthly').value=b.monthly_budget_usd||50; document.getElementById('budgetInCost').value=b.input_cost_per_1k||0.0012; document.getElementById('budgetOutCost').value=b.output_cost_per_1k||0.0024; document.getElementById('budgetEnabled').checked=!!b.enabled; document.getElementById('budgetBaseUrl').value=b.base_url||'https://dashscope.aliyuncs.com/compatible-mode/v1'; document.getElementById('budgetTimeout').value=b.timeout_sec||1.2; document.getElementById('budgetApiKey').placeholder=b.api_key_configured?'已配置（留空表示不修改）':'sk-xxx（保存后即时生效）'; const cards=[['当前模型',b.model],['AI密钥状态',b.api_key_configured?'已配置':'未配置'],['累计Token消耗',b.total_tokens],['预计支出(USD)',Number(b.estimated_cost_usd||0).toFixed(6)],['月预算使用率',`${(Number(b.budget_used_rate||0)*100).toFixed(1)}%`]]; document.getElementById('budgetCards').innerHTML=cards.map(([k,v])=>`<div class="kpi"><div class="k">${k}</div><div class="v">${v}</div></div>`).join(''); }
+    async function saveBudgetSetting(){ const key=document.getElementById('budgetApiKey').value; const body={model:document.getElementById('budgetModel').value,api_key:key?key:undefined,base_url:document.getElementById('budgetBaseUrl').value,timeout_sec:Number(document.getElementById('budgetTimeout').value||1.2),enabled:document.getElementById('budgetEnabled').checked,monthly_budget_usd:Number(document.getElementById('budgetMonthly').value||50),input_cost_per_1k:Number(document.getElementById('budgetInCost').value||0.0012),output_cost_per_1k:Number(document.getElementById('budgetOutCost').value||0.0024)}; const res=await fetch('/api/admin/budget/model',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); const d=await res.json(); if(!res.ok){alert(d.detail||'保存失败');return;} document.getElementById('budgetApiKey').value=''; alert('模型与预算配置已保存并已即时生效'); await loadBudget(); await loadAiNotice(); }
+    restoreOpsBatchFromStorage();
     loadMetrics(); loadInventoryStats(); loadInventoryList(); loadBudget(); loadAiNotice();
+    if (window.__opsBatchId) { opsRefresh(1); }
   </script>
 </body>
 </html>

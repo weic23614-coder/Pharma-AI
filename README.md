@@ -272,3 +272,10 @@ export BAILIAN_TIMEOUT_SEC=1.2
 1. 每次需求迭代先新建分支
 2. 功能完成后提 PR 自检
 3. 合并到 `main` 前跑一遍接口回归与 Demo 冒烟
+
+---
+
+## 14. 配套文档
+
+- 部署手册：`DEPLOY.md`
+- API 调用样例：`API_EXAMPLES.md`

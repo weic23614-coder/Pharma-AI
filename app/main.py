@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import io
 import json
+import os
 import random
 import sqlite3
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
@@ -21,7 +24,7 @@ from app.ai_brain import BailianAIBrain
 from app.bundle_engine import BundleEngine, EngineCandidate, EngineInput, EnginePolicy, EngineStrategy
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-DB_PATH = BASE_DIR / "app.db"
+DB_PATH = Path(os.getenv("APP_DB_PATH", str(BASE_DIR / "app.db")))
 
 app = FastAPI(title="1药网 AI 组货中间件 MVP", version="0.1.0")
 templates = Jinja2Templates(directory=str(BASE_DIR / "app" / "templates"))
@@ -52,15 +55,111 @@ class RecommendRequest(BaseModel):
     user_id: str | None = None
 
 
+def _resolve_item_code(cur: sqlite3.Cursor, sku_id: str) -> str:
+    """商品编码：优先库存表 item_code，其次 product_code，否则 sku_id。"""
+    if not sku_id:
+        return ""
+    row = cur.execute(
+        """
+        SELECT COALESCE(NULLIF(TRIM(item_code), ''), NULLIF(TRIM(product_code), ''), sku_id)
+        FROM products WHERE sku_id=?
+        """,
+        (sku_id,),
+    ).fetchone()
+    if row and row[0]:
+        return str(row[0])
+    return str(sku_id)
+
+
+def _enrich_bundle_row(cur: sqlite3.Cursor, d: dict[str, Any]) -> None:
+    if not d.get("main_item_code"):
+        d["main_item_code"] = _resolve_item_code(cur, str(d.get("main_sku_id") or ""))
+    if not d.get("selected_item_code"):
+        d["selected_item_code"] = _resolve_item_code(cur, str(d.get("selected_sku_id") or ""))
+    if d.get("sales_copy"):
+        d["sales_copy"] = BundleEngine.strip_legacy_bundle_sales_tail(str(d["sales_copy"]))
+    pn = (d.get("package_name") or "").strip()
+    if not pn:
+        try:
+            pay = json.loads(d.get("decision_payload") or "{}")
+            pn = (pay.get("package_name") or "").strip()
+        except Exception:
+            pn = ""
+        if not pn:
+            pn = BundleEngine().build_package_name(
+                str(d.get("main_product_name") or ""),
+                d.get("main_category"),
+                str(d.get("selected_product_name") or ""),
+                None,
+                str(d.get("medical_logic") or ""),
+            )
+        d["package_name"] = pn
+
+
 def db_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    # SQLite 在并发写场景下容易短暂锁表，这里增加等待时间并启用 busy_timeout。
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 30000")
     return conn
+
+
+def _execute_with_retry(
+    cur: sqlite3.Cursor,
+    sql: str,
+    params: tuple[Any, ...] | list[Any] = (),
+    retries: int = 8,
+    sleep_sec: float = 0.25,
+) -> None:
+    for i in range(retries):
+        try:
+            cur.execute(sql, tuple(params))
+            return
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower() or i == retries - 1:
+                raise
+            time.sleep(sleep_sec * (i + 1))
+
+
+def _executemany_with_retry(
+    cur: sqlite3.Cursor,
+    sql: str,
+    rows: list[tuple[Any, ...]],
+    retries: int = 6,
+    sleep_sec: float = 0.35,
+) -> None:
+    for i in range(retries):
+        try:
+            cur.executemany(sql, rows)
+            return
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower() or i == retries - 1:
+                raise
+            time.sleep(sleep_sec * (i + 1))
 
 
 def init_db() -> None:
     conn = db_conn()
     cur = conn.cursor()
+    # WAL 模式可以显著减少读写互斥带来的锁冲突。
+    # 某些情况下（例如上次异常退出）这里会短暂锁库，做重试并降级，避免启动直接失败。
+    pragma_ok = False
+    for i in range(8):
+        try:
+            cur.execute("PRAGMA journal_mode=WAL")
+            cur.execute("PRAGMA synchronous=NORMAL")
+            pragma_ok = True
+            break
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower():
+                raise
+            time.sleep(0.2 * (i + 1))
+    if not pragma_ok:
+        try:
+            cur.execute("PRAGMA synchronous=NORMAL")
+        except sqlite3.OperationalError:
+            # 保底：即使无法设置 pragma，也继续初始化表结构。
+            pass
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS policies (
@@ -104,6 +203,11 @@ def init_db() -> None:
         CREATE TABLE IF NOT EXISTS products (
             sku_id TEXT PRIMARY KEY,
             product_name TEXT NOT NULL,
+            product_code TEXT,
+            manufacturer TEXT,
+            department TEXT,
+            item_code TEXT,
+            level1_category TEXT,
             category TEXT NOT NULL,
             role TEXT NOT NULL,
             cost REAL NOT NULL,
@@ -196,6 +300,9 @@ def init_db() -> None:
             addon_price REAL NOT NULL,
             projected_profit REAL NOT NULL,
             sales_copy TEXT NOT NULL,
+            package_name TEXT NOT NULL DEFAULT '',
+            main_item_code TEXT NOT NULL DEFAULT '',
+            selected_item_code TEXT NOT NULL DEFAULT '',
             decision_payload TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'draft',
             created_at TEXT NOT NULL,
@@ -224,6 +331,9 @@ def init_db() -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             provider TEXT NOT NULL,
             model TEXT NOT NULL,
+            api_key TEXT,
+            base_url TEXT,
+            timeout_sec REAL NOT NULL DEFAULT 1.2,
             enabled INTEGER NOT NULL DEFAULT 1,
             monthly_budget_usd REAL NOT NULL DEFAULT 50,
             input_cost_per_1k REAL NOT NULL DEFAULT 0.001,
@@ -253,6 +363,35 @@ def init_db() -> None:
     if "gmv" not in cols:
         cur.execute("ALTER TABLE uploaded_products ADD COLUMN gmv REAL NOT NULL DEFAULT 0")
         conn.commit()
+    product_cols = [r["name"] for r in cur.execute("PRAGMA table_info(products)").fetchall()]
+    for name, ddl in [
+        ("product_code", "ALTER TABLE products ADD COLUMN product_code TEXT"),
+        ("manufacturer", "ALTER TABLE products ADD COLUMN manufacturer TEXT"),
+        ("department", "ALTER TABLE products ADD COLUMN department TEXT"),
+        ("item_code", "ALTER TABLE products ADD COLUMN item_code TEXT"),
+        ("level1_category", "ALTER TABLE products ADD COLUMN level1_category TEXT"),
+    ]:
+        if name not in product_cols:
+            cur.execute(ddl)
+            conn.commit()
+    br_cols = [r["name"] for r in cur.execute("PRAGMA table_info(bundle_recommendations)").fetchall()]
+    for name, ddl in [
+        ("package_name", "ALTER TABLE bundle_recommendations ADD COLUMN package_name TEXT NOT NULL DEFAULT ''"),
+        ("main_item_code", "ALTER TABLE bundle_recommendations ADD COLUMN main_item_code TEXT NOT NULL DEFAULT ''"),
+        ("selected_item_code", "ALTER TABLE bundle_recommendations ADD COLUMN selected_item_code TEXT NOT NULL DEFAULT ''"),
+    ]:
+        if name not in br_cols:
+            cur.execute(ddl)
+            conn.commit()
+    llm_cols = [r["name"] for r in cur.execute("PRAGMA table_info(llm_settings)").fetchall()]
+    for name, ddl in [
+        ("api_key", "ALTER TABLE llm_settings ADD COLUMN api_key TEXT"),
+        ("base_url", "ALTER TABLE llm_settings ADD COLUMN base_url TEXT"),
+        ("timeout_sec", "ALTER TABLE llm_settings ADD COLUMN timeout_sec REAL NOT NULL DEFAULT 1.2"),
+    ]:
+        if name not in llm_cols:
+            cur.execute(ddl)
+            conn.commit()
     cur.execute("SELECT COUNT(*) AS cnt FROM policies")
     count = cur.fetchone()["cnt"]
     if count == 0:
@@ -342,6 +481,7 @@ def init_db() -> None:
 @app.on_event("startup")
 def startup_event() -> None:
     init_db()
+    _refresh_ai_brain_from_setting()
 
 
 def now_iso() -> str:
@@ -418,6 +558,18 @@ def _get_llm_setting() -> dict[str, Any]:
     return dict(row) if row else {}
 
 
+def _refresh_ai_brain_from_setting() -> dict[str, Any]:
+    setting = _get_llm_setting()
+    ai_brain.configure(
+        enabled=bool(setting.get("enabled", 1)),
+        api_key=str(setting.get("api_key") or os.getenv("BAILIAN_API_KEY", "")),
+        model=str(setting.get("model") or ai_brain.model),
+        base_url=str(setting.get("base_url") or os.getenv("BAILIAN_BASE_URL", ai_brain.base_url)),
+        timeout=float(setting.get("timeout_sec") or os.getenv("BAILIAN_TIMEOUT_SEC", ai_brain.timeout)),
+    )
+    return setting
+
+
 def _log_ai_usage(
     scene: str,
     model: str,
@@ -468,8 +620,8 @@ def _log_ai_attempt(source: str, model: str) -> None:
 
 
 def _is_ai_allowed() -> bool:
-    setting = _get_llm_setting()
-    return ai_brain.is_enabled() and bool(setting.get("enabled", 1))
+    _refresh_ai_brain_from_setting()
+    return ai_brain.is_enabled()
 
 
 def _build_recommendation_result(
@@ -511,6 +663,12 @@ def _build_recommendation_result(
             category=c.category,
         )
         for c in candidates
+        if not engine.is_addon_inappropriate_for_main(
+            main_item.product_name,
+            main_item.category,
+            c.product_name,
+            c.category,
+        )
     ]
     if prefer_ai and _is_ai_allowed():
         _log_ai_attempt("ai_attempt", ai_brain.model)
@@ -554,16 +712,33 @@ def _build_recommendation_result(
             candidate_map = {c.sku_id: c for c in engine_candidates}
             selected = candidate_map.get(str(llm_data.get("selected_sku_id", "")).strip())
             if selected:
-                anchor_ratio = strategy.get("pricing_rules", {}).get("anchor_ratio", 0.42)
-                min_margin_rate = strategy.get("pricing_rules", {}).get("min_margin_rate", 0.35)
-                margin_rate = max(float(policy_like["margin_rate"]), float(min_margin_rate))
-                ar = anchor_ratio if variant == "A" else max(0.3, anchor_ratio - 0.03)
-                addon_price = round(max(selected.cost * (1 + margin_rate), selected.original_price * ar), 2)
-                projected_profit = round(addon_price - selected.cost, 2)
-                sales_copy = str(llm_data.get("sales_copy") or "").strip() or f"【药师建议】建议搭配{selected.product_name}。"
+                # 组货只管选品；价格一律用副品原价，后续业务侧再谈促销/换购价。
+                addon_price = round(float(selected.original_price or 0), 2)
+                projected_profit = round(addon_price - float(selected.cost or 0), 2)
+                sales_copy = str(llm_data.get("sales_copy") or "").strip()
+                if not sales_copy:
+                    sales_copy = BundleEngine().build_consumer_sales_copy(
+                        main_item.product_name,
+                        main_item.category,
+                        selected.product_name,
+                        selected.category,
+                        policy_like["logic_type"],
+                        variant,
+                        list(strategy.get("forbidden_terms") or []),
+                    )
                 forbidden_terms = strategy.get("forbidden_terms", [])
                 for bad in forbidden_terms:
                     sales_copy = sales_copy.replace(str(bad), "")
+                sales_copy = BundleEngine.strip_legacy_bundle_sales_tail(sales_copy)
+                pkg = str(llm_data.get("package_name") or "").strip()
+                if not pkg:
+                    pkg = BundleEngine().build_package_name(
+                        main_item.product_name,
+                        main_item.category,
+                        selected.product_name,
+                        selected.category,
+                        policy_like["logic_type"],
+                    )
                 return {
                     "recommendation": {
                         "request_id": f"req_{int(datetime.now().timestamp() * 1000)}_{random.randint(100, 999)}",
@@ -571,15 +746,17 @@ def _build_recommendation_result(
                         "selected_sku_id": selected.sku_id,
                         "product_name": selected.product_name,
                         "medical_logic": str(llm_data.get("medical_logic") or policy_like["logic_type"]),
+                        "package_name": pkg,
                         "sales_copy": sales_copy,
                         "pricing_strategy": {
                             "addon_price": addon_price,
                             "original_price": selected.original_price,
-                            "display_tag": f"加{addon_price:.0f}元换购价",
+                            "display_tag": f"按商品原价 ¥{addon_price:.2f}",
                         },
                         "projected_profit": projected_profit,
                         "decision_trace": {
                             "source": "bailian_llm",
+                            "price_mode": "original_price",
                             "confidence": float(llm_data.get("confidence", 0.5) or 0.5),
                             "medical_reason": str(llm_data.get("medical_reason", "")),
                             "model": model_used,
@@ -668,12 +845,13 @@ def health() -> dict[str, str]:
 
 @app.get("/api/admin/ai-status")
 def ai_status() -> dict[str, Any]:
-    setting = _get_llm_setting()
+    setting = _refresh_ai_brain_from_setting()
     return {
-        "enabled": _is_ai_allowed(),
+        "enabled": ai_brain.is_enabled(),
         "model": setting.get("model", ai_brain.model),
         "base_url": ai_brain.base_url,
         "timeout_sec": ai_brain.timeout,
+        "api_key_configured": bool(ai_brain.api_key),
     }
 
 
@@ -1148,11 +1326,12 @@ async def ops_upload_catalog(file: UploadFile = File(...)) -> dict[str, Any]:
     content = await file.read()
     wb = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
     ws = wb[wb.sheetnames[0]]
-    rows = list(ws.iter_rows(values_only=True))
-    if not rows:
+    row_iter = ws.iter_rows(values_only=True)
+    header_row = next(row_iter, None)
+    if not header_row:
         raise HTTPException(status_code=400, detail="文件为空")
 
-    headers = [str(x).strip() if x is not None else "" for x in rows[0]]
+    headers = [str(x).strip() if x is not None else "" for x in header_row]
     sku_idx = find_col_idx(headers, {"sku", "sku_id", "商品编码", "产品编码", "商品sku", "商品id", "货号"})
     name_idx = find_col_idx(headers, {"商品名称", "产品名称", "药品名称", "名称", "商品名", "通用名"})
     cat_idx = find_col_idx(headers, {"类目", "商品类目", "一级类目", "二级类目", "品类", "科室"})
@@ -1166,28 +1345,33 @@ async def ops_upload_catalog(file: UploadFile = File(...)) -> dict[str, Any]:
         missing.append("SKU")
     if name_idx is None:
         missing.append("商品名称")
-    if price_idx is None:
-        missing.append("价格")
     if missing:
         raise HTTPException(status_code=400, detail=f"缺少关键字段: {', '.join(missing)}")
 
     batch_id = f"batch_{uuid.uuid4().hex[:10]}"
     now = now_iso()
     parsed = []
-    for row in rows[1:]:
+    for row in row_iter:
         sku = str(row[sku_idx]).strip() if row[sku_idx] is not None else ""
         name = str(row[name_idx]).strip() if row[name_idx] is not None else ""
         if not sku or not name:
             continue
         category = str(row[cat_idx]).strip() if cat_idx is not None and row[cat_idx] else "未分类"
-        price = to_float(row[price_idx], 0)
+        qty = int(to_float(row[qty_idx], 1)) if qty_idx is not None else 1
+        if qty <= 0:
+            qty = 1
+        gmv = to_float(row[gmv_idx], 0) if gmv_idx is not None else 0
+        price = to_float(row[price_idx], 0) if price_idx is not None else 0
+        if price <= 0 and gmv > 0:
+            price = round(gmv / qty, 2)
         if price <= 0:
-            continue
+            # 组货阶段不以价格为门槛；缺失时给占位值。
+            price = 99.0
         cost = to_float(row[cost_idx], 0) if cost_idx is not None else 0
         if cost <= 0:
             cost = round(price * 0.78, 2)
-        qty = int(to_float(row[qty_idx], 1)) if qty_idx is not None else 1
-        gmv = to_float(row[gmv_idx], 0) if gmv_idx is not None else round(price * max(qty, 1), 2)
+        if gmv <= 0:
+            gmv = round(price * qty, 2)
         parsed.append((batch_id, sku, name, category, price, cost, max(qty, 1), gmv, infer_role(category, name), now))
 
     if not parsed:
@@ -1195,19 +1379,27 @@ async def ops_upload_catalog(file: UploadFile = File(...)) -> dict[str, Any]:
 
     conn = db_conn()
     cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO upload_batches (id, filename, total_rows, created_at) VALUES (?, ?, ?, ?)",
-        (batch_id, file.filename, len(parsed), now),
-    )
-    cur.executemany(
-        """
-        INSERT INTO uploaded_products (
-          batch_id, sku_id, product_name, category, price, cost, qty, gmv, role_hint, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        parsed,
-    )
-    conn.commit()
+    try:
+        _execute_with_retry(
+            cur,
+            "INSERT INTO upload_batches (id, filename, total_rows, created_at) VALUES (?, ?, ?, ?)",
+            (batch_id, file.filename, len(parsed), now),
+        )
+        _executemany_with_retry(
+            cur,
+            """
+            INSERT INTO uploaded_products (
+              batch_id, sku_id, product_name, category, price, cost, qty, gmv, role_hint, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            parsed,
+        )
+        conn.commit()
+    except sqlite3.OperationalError as exc:
+        conn.rollback()
+        if "locked" in str(exc).lower():
+            raise HTTPException(status_code=503, detail="数据库忙，请3秒后重试一次上传") from exc
+        raise
     conn.close()
     return {"batch_id": batch_id, "total_rows": len(parsed)}
 
@@ -1230,14 +1422,21 @@ async def ops_upload_library(
     if not rows:
         raise HTTPException(status_code=400, detail="文件为空")
     headers = [str(x).strip() if x is not None else "" for x in rows[0]]
-    sku_idx = find_col_idx(headers, {"sku", "sku_id", "商品编码", "产品编码", "商品sku", "商品id", "货号"})
+    sku_idx = find_col_idx(headers, {"sku", "sku_id", "商品编码", "商品sku", "商品id", "货号"})
     name_idx = find_col_idx(headers, {"商品名称", "产品名称", "药品名称", "名称", "商品名", "通用名"})
-    cat_idx = find_col_idx(headers, {"类目", "商品类目", "一级类目", "二级类目", "品类", "科室"})
+    product_code_idx = find_col_idx(headers, {"产品编码", "药网编码", "产品id"})
+    manufacturer_idx = find_col_idx(headers, {"生产厂商", "厂商", "厂家"})
+    department_idx = find_col_idx(headers, {"科室"})
+    item_code_idx = find_col_idx(headers, {"商品编码"})
+    level1_cat_idx = find_col_idx(headers, {"一级类目", "类目", "商品类目", "品类"})
+    cat_idx = level1_cat_idx if level1_cat_idx is not None else department_idx
     price_idx = find_col_idx(headers, {"成交价", "单价", "实付单价", "吊牌价", "销售价", "销售单价", "gmv"})
     cost_idx = find_col_idx(headers, {"成本", "采购价", "供货价", "成本价", "revenue"})
     role_idx = find_col_idx(headers, {"角色", "role", "商品角色", "类型"})
-    if sku_idx is None or name_idx is None or price_idx is None:
-        raise HTTPException(status_code=400, detail="缺少关键字段: SKU/商品名/价格")
+    if sku_idx is None:
+        sku_idx = item_code_idx
+    if sku_idx is None or name_idx is None:
+        raise HTTPException(status_code=400, detail="缺少关键字段: 商品编码(或SKU)/产品名称")
     now = now_iso()
     upserts = []
     for row in rows[1:]:
@@ -1246,9 +1445,15 @@ async def ops_upload_library(
         if not sku or not name:
             continue
         category = str(row[cat_idx]).strip() if cat_idx is not None and row[cat_idx] else "未分类"
-        price = to_float(row[price_idx], 0)
+        product_code = str(row[product_code_idx]).strip() if product_code_idx is not None and row[product_code_idx] else ""
+        manufacturer = str(row[manufacturer_idx]).strip() if manufacturer_idx is not None and row[manufacturer_idx] else ""
+        department = str(row[department_idx]).strip() if department_idx is not None and row[department_idx] else ""
+        item_code = str(row[item_code_idx]).strip() if item_code_idx is not None and row[item_code_idx] else sku
+        level1_category = str(row[level1_cat_idx]).strip() if level1_cat_idx is not None and row[level1_cat_idx] else category
+        price = to_float(row[price_idx], 0) if price_idx is not None else 0
+        # 库存清单常常没有价格字段，使用默认定价占位，后续可在后台维护真实价格。
         if price <= 0:
-            continue
+            price = 99.0
         cost = to_float(row[cost_idx], 0) if cost_idx is not None else 0
         if cost <= 0:
             cost = round(price * 0.78, 2)
@@ -1257,7 +1462,24 @@ async def ops_upload_library(
         if role not in {"main", "addon"}:
             role = infer_role(category, name)
         margin_rate = max(0.01, min(0.95, (price - cost) / max(price, 1)))
-        upserts.append((sku, name, category, role, cost, price, round(margin_rate, 3), 1, now))
+        upserts.append(
+            (
+                sku,
+                name,
+                product_code,
+                manufacturer,
+                department,
+                item_code,
+                level1_category,
+                category,
+                role,
+                cost,
+                price,
+                round(margin_rate, 3),
+                1,
+                now,
+            )
+        )
     if not upserts:
         raise HTTPException(status_code=400, detail="没有可导入商品")
     conn = db_conn()
@@ -1265,10 +1487,16 @@ async def ops_upload_library(
     cur.executemany(
         """
         INSERT INTO products (
-          sku_id, product_name, category, role, cost, original_price, gross_margin_rate, active, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          sku_id, product_name, product_code, manufacturer, department, item_code, level1_category,
+          category, role, cost, original_price, gross_margin_rate, active, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(sku_id) DO UPDATE SET
           product_name=excluded.product_name,
+          product_code=excluded.product_code,
+          manufacturer=excluded.manufacturer,
+          department=excluded.department,
+          item_code=excluded.item_code,
+          level1_category=excluded.level1_category,
           category=excluded.category,
           role=excluded.role,
           cost=excluded.cost,
@@ -1319,7 +1547,21 @@ def ops_inventory_list(
     total = cur.execute(f"SELECT COUNT(*) AS c FROM products WHERE {where_sql}", tuple(params)).fetchone()["c"]
     rows = cur.execute(
         f"""
-        SELECT sku_id, product_name, category, role, cost, original_price, gross_margin_rate, active, updated_at
+        SELECT
+          sku_id,
+          product_name,
+          COALESCE(product_code, '') AS product_code,
+          COALESCE(manufacturer, '') AS manufacturer,
+          COALESCE(department, '') AS department,
+          COALESCE(item_code, '') AS item_code,
+          COALESCE(level1_category, '') AS level1_category,
+          category,
+          role,
+          cost,
+          original_price,
+          gross_margin_rate,
+          active,
+          updated_at
         FROM products
         WHERE {where_sql}
         ORDER BY updated_at DESC
@@ -1341,7 +1583,7 @@ async def ops_inventory_upload(
 
 @app.get("/api/admin/budget")
 def admin_budget() -> dict[str, Any]:
-    setting = _get_llm_setting()
+    setting = _refresh_ai_brain_from_setting()
     conn = db_conn()
     cur = conn.cursor()
     usage = cur.execute(
@@ -1362,6 +1604,9 @@ def admin_budget() -> dict[str, Any]:
         "provider": setting.get("provider", "bailian"),
         "model": setting.get("model", ai_brain.model),
         "enabled": bool(setting.get("enabled", 1)),
+        "base_url": str(setting.get("base_url") or ai_brain.base_url),
+        "timeout_sec": float(setting.get("timeout_sec") or ai_brain.timeout),
+        "api_key_configured": bool(setting.get("api_key") or ai_brain.api_key),
         "monthly_budget_usd": monthly_budget,
         "input_cost_per_1k": float(setting.get("input_cost_per_1k", 0.0012) or 0.0012),
         "output_cost_per_1k": float(setting.get("output_cost_per_1k", 0.0024) or 0.0024),
@@ -1375,6 +1620,9 @@ def admin_budget() -> dict[str, Any]:
 
 class BudgetSettingIn(BaseModel):
     model: str
+    api_key: str | None = None
+    base_url: str | None = None
+    timeout_sec: float = 1.2
     enabled: bool = True
     monthly_budget_usd: float = 50
     input_cost_per_1k: float = 0.0012
@@ -1385,17 +1633,21 @@ class BudgetSettingIn(BaseModel):
 def admin_update_budget_setting(data: BudgetSettingIn) -> dict[str, Any]:
     conn = db_conn()
     cur = conn.cursor()
-    cur.execute("SELECT id FROM llm_settings ORDER BY id DESC LIMIT 1")
+    cur.execute("SELECT * FROM llm_settings ORDER BY id DESC LIMIT 1")
     row = cur.fetchone()
+    api_key_to_save = (data.api_key or "").strip() if data.api_key is not None else (row["api_key"] if row else "")
     if row:
         cur.execute(
             """
             UPDATE llm_settings
-            SET model=?, enabled=?, monthly_budget_usd=?, input_cost_per_1k=?, output_cost_per_1k=?, updated_at=?
+            SET model=?, api_key=?, base_url=?, timeout_sec=?, enabled=?, monthly_budget_usd=?, input_cost_per_1k=?, output_cost_per_1k=?, updated_at=?
             WHERE id=?
             """,
             (
                 data.model,
+                api_key_to_save,
+                (data.base_url or "").strip() or ai_brain.base_url,
+                max(float(data.timeout_sec), 0.5),
                 1 if data.enabled else 0,
                 data.monthly_budget_usd,
                 data.input_cost_per_1k,
@@ -1408,14 +1660,25 @@ def admin_update_budget_setting(data: BudgetSettingIn) -> dict[str, Any]:
         cur.execute(
             """
             INSERT INTO llm_settings (
-              provider, model, enabled, monthly_budget_usd, input_cost_per_1k, output_cost_per_1k, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+              provider, model, api_key, base_url, timeout_sec, enabled, monthly_budget_usd, input_cost_per_1k, output_cost_per_1k, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            ("bailian", data.model, 1 if data.enabled else 0, data.monthly_budget_usd, data.input_cost_per_1k, data.output_cost_per_1k, now_iso()),
+            (
+                "bailian",
+                data.model,
+                api_key_to_save,
+                (data.base_url or "").strip() or ai_brain.base_url,
+                max(float(data.timeout_sec), 0.5),
+                1 if data.enabled else 0,
+                data.monthly_budget_usd,
+                data.input_cost_per_1k,
+                data.output_cost_per_1k,
+                now_iso(),
+            ),
         )
     conn.commit()
     conn.close()
-    ai_brain.model = data.model
+    _refresh_ai_brain_from_setting()
     return {"message": "saved"}
 
 
@@ -1428,8 +1691,11 @@ def ops_generate_strategies(
     use_ai: bool = Query(default=True),
     force_ai_only: bool = Query(default=False),
 ) -> dict[str, Any]:
+    from collections import Counter
+
     conn = db_conn()
     cur = conn.cursor()
+    relation_engine = BundleEngine()
     order_sql = "total_qty DESC, total_gmv DESC"
     if sort_by == "gmv":
         order_sql = "total_gmv DESC, total_qty DESC"
@@ -1451,6 +1717,12 @@ def ops_generate_strategies(
         """,
         (batch_id, top_n),
     ).fetchall()
+    if not mains:
+        conn.close()
+        raise HTTPException(
+            status_code=400,
+            detail="该 batch_id 在数据库中没有待组货商品。请重新上传 Excel，或确认服务使用的 APP_DB_PATH 与上传时一致。",
+        )
     batch_candidates = cur.execute(
         """
         SELECT
@@ -1481,11 +1753,18 @@ def ops_generate_strategies(
     created = 0
     ai_count = 0
     rule_count = 0
+    selected_counter: Counter[str] = Counter()
     skip_no_candidates = 0
     skip_exception = 0
     errors: list[dict[str, str]] = []
     now = now_iso()
-    cur.execute("DELETE FROM bundle_recommendations WHERE batch_id=?", (batch_id,))
+    try:
+        _execute_with_retry(cur, "DELETE FROM bundle_recommendations WHERE batch_id=?", (batch_id,))
+    except sqlite3.OperationalError as exc:
+        conn.close()
+        if "locked" in str(exc).lower():
+            raise HTTPException(status_code=503, detail="数据库忙，请稍后重试生成") from exc
+        raise
     for m in mains:
         policy = cur.execute(
             "SELECT * FROM policies WHERE category=? AND active=1 ORDER BY updated_at DESC LIMIT 1",
@@ -1500,17 +1779,33 @@ def ops_generate_strategies(
             price=m["price"],
             cost=m["cost"],
         )
-        candidate_pool = [
-            CandidateItem(
+        main_cat = str(m["category"] or "")
+        rel_tokens = set(relation_engine.relation_map.get(main_cat, set()))
+        if main_cat:
+            rel_tokens.add(main_cat)
+        prefetched: list[CandidateItem] = []
+        fallback_pool: list[CandidateItem] = []
+        for a in candidate_rows:
+            if a["sku_id"] == m["sku_id"]:
+                continue
+            item = CandidateItem(
                 sku_id=a["sku_id"],
                 product_name=a["product_name"],
                 cost=a["cost"],
                 original_price=a["price"],
                 category=a["category"],
             )
-            for a in candidate_rows
-            if a["sku_id"] != m["sku_id"]
-        ]
+            if relation_engine.is_addon_inappropriate_for_main(
+                m["product_name"], m["category"], a["product_name"], a["category"]
+            ):
+                continue
+            text = f"{a['product_name']}{a['category'] or ''}"
+            if rel_tokens and any(t in text for t in rel_tokens):
+                prefetched.append(item)
+            else:
+                fallback_pool.append(item)
+        # 先用强相关候选，不足时补充，且限制总候选规模，避免几千SKU导致长时间卡住。
+        candidate_pool = (prefetched[:260] + fallback_pool[:120])[:320]
         if not candidate_pool:
             skip_no_candidates += 1
             continue
@@ -1529,6 +1824,29 @@ def ops_generate_strategies(
                 prefer_ai=use_ai,
                 force_ai_only=force_ai_only,
             )
+            # 限制同一副品在单批次中的占比，防止“单品灌全场”。
+            rec_selected_name = result.get("recommendation", {}).get("product_name", "")
+            if rec_selected_name:
+                future_total = created + 1
+                future_cnt = selected_counter[rec_selected_name] + 1
+                max_share = 0.12
+                if future_total >= 30 and (future_cnt / future_total) > max_share:
+                    filtered_pool = [c for c in candidate_pool if c.product_name != rec_selected_name]
+                    if filtered_pool:
+                        result = _build_recommendation_result(
+                            main_item=main_item,
+                            user_id=None,
+                            candidates=filtered_pool,
+                            policy_like={
+                                "logic_type": policy["logic_type"],
+                                "prompt_hint": policy["prompt_hint"],
+                                "margin_rate": policy["margin_rate"],
+                            },
+                            strategy=strategy,
+                            variant="A",
+                            prefer_ai=use_ai,
+                            force_ai_only=False,
+                        )
         except ValueError as exc:
             if "候选池为空" in str(exc):
                 skip_no_candidates += 1
@@ -1543,18 +1861,32 @@ def ops_generate_strategies(
                 errors.append({"sku_id": m["sku_id"], "product_name": m["product_name"], "reason": str(exc) or "unexpected_error"})
             continue
         rec = result["recommendation"]
+        selected_counter[rec["product_name"]] += 1
         src = rec.get("decision_trace", {}).get("source", "rule_engine")
         if src == "bailian_llm":
             ai_count += 1
         else:
             rule_count += 1
-        cur.execute(
+        main_ic = _resolve_item_code(cur, str(m["sku_id"]))
+        sel_ic = _resolve_item_code(cur, str(rec["selected_sku_id"]))
+        pkg_nm = (rec.get("package_name") or "").strip() or BundleEngine().build_package_name(
+            m["product_name"],
+            m["category"],
+            rec["product_name"],
+            None,
+            str(rec.get("medical_logic") or ""),
+        )
+        rec_out = dict(rec)
+        rec_out["package_name"] = pkg_nm
+        _execute_with_retry(
+            cur,
             """
             INSERT INTO bundle_recommendations (
               batch_id, main_sku_id, main_product_name, main_category, selected_sku_id,
               selected_product_name, medical_logic, addon_price, projected_profit, sales_copy,
+              package_name, main_item_code, selected_item_code,
               decision_payload, status, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)
             """,
             (
                 batch_id,
@@ -1567,14 +1899,24 @@ def ops_generate_strategies(
                 rec["pricing_strategy"]["addon_price"],
                 rec["projected_profit"],
                 rec["sales_copy"],
-                json.dumps(rec, ensure_ascii=False),
+                pkg_nm,
+                main_ic,
+                sel_ic,
+                json.dumps(rec_out, ensure_ascii=False),
                 now,
                 now,
             ),
         )
         created += 1
 
-    conn.commit()
+    try:
+        conn.commit()
+    except sqlite3.OperationalError as exc:
+        conn.rollback()
+        conn.close()
+        if "locked" in str(exc).lower():
+            raise HTTPException(status_code=503, detail="数据库忙，请稍后重试生成") from exc
+        raise
     conn.close()
     return {
         "batch_id": batch_id,
@@ -1591,26 +1933,34 @@ def ops_generate_strategies(
             "candidate_pool_size": len(candidate_rows),
             "skip_no_candidates": skip_no_candidates,
             "skip_exception": skip_exception,
+            "top_selected_products": selected_counter.most_common(8),
             "errors": errors,
         },
     }
 
 
 @app.get("/api/ops/strategies")
-def ops_list_strategies(batch_id: str, status: str | None = None) -> dict[str, Any]:
+def ops_list_strategies(
+    batch_id: str,
+    status: str | None = None,
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
     conn = db_conn()
     cur = conn.cursor()
+    where = "batch_id=?"
+    params: list[Any] = [batch_id]
     if status:
-        rows = cur.execute(
-            "SELECT * FROM bundle_recommendations WHERE batch_id=? AND status=? ORDER BY id DESC",
-            (batch_id, status),
-        ).fetchall()
-    else:
-        rows = cur.execute(
-            "SELECT * FROM bundle_recommendations WHERE batch_id=? ORDER BY id DESC",
-            (batch_id,),
-        ).fetchall()
-    conn.close()
+        where += " AND status=?"
+        params.append(status)
+    total = cur.execute(
+        f"SELECT COUNT(*) AS c FROM bundle_recommendations WHERE {where}",
+        tuple(params),
+    ).fetchone()["c"]
+    rows = cur.execute(
+        f"SELECT * FROM bundle_recommendations WHERE {where} ORDER BY id DESC LIMIT ? OFFSET ?",
+        tuple(params + [limit, offset]),
+    ).fetchall()
     items = []
     for r in rows:
         d = dict(r)
@@ -1622,8 +1972,64 @@ def ops_list_strategies(batch_id: str, status: str | None = None) -> dict[str, A
             source = "rule_engine"
         d["source"] = source
         d["source_label"] = "百炼AI" if source == "bailian_llm" else "规则引擎"
+        _enrich_bundle_row(cur, d)
         items.append(d)
-    return {"items": items}
+    conn.close()
+    return {"total": total, "limit": limit, "offset": offset, "items": items}
+
+
+@app.get("/api/ops/strategies/export")
+def ops_export_strategies(batch_id: str) -> Response:
+    """导出当前批次全部组货为 CSV（UTF-8 BOM，Excel 可直接打开）。"""
+    conn = db_conn()
+    cur = conn.cursor()
+    rows = cur.execute(
+        """
+        SELECT * FROM bundle_recommendations
+        WHERE batch_id=?
+        ORDER BY id ASC
+        """,
+        (batch_id,),
+    ).fetchall()
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(
+        [
+            "ID",
+            "套餐名称",
+            "商品A",
+            "商品A商品编码",
+            "商品B",
+            "商品B商品编码",
+            "组货卖点",
+            "商品价格",
+            "参考毛利",
+        ]
+    )
+    for r in rows:
+        d = dict(r)
+        _enrich_bundle_row(cur, d)
+        writer.writerow(
+            [
+                d.get("id"),
+                d.get("package_name") or "",
+                d.get("main_product_name") or "",
+                d.get("main_item_code") or d.get("main_sku_id") or "",
+                d.get("selected_product_name") or "",
+                d.get("selected_item_code") or d.get("selected_sku_id") or "",
+                (d.get("sales_copy") or "").replace("\r\n", " ").replace("\n", " "),
+                d.get("addon_price"),
+                d.get("projected_profit"),
+            ]
+        )
+    conn.close()
+    raw = "\ufeff" + buf.getvalue()
+    fname = f"bundles_{batch_id}.csv"
+    return Response(
+        content=raw.encode("utf-8"),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
 
 
 @app.post("/api/ops/strategies/{item_id}/confirm")
