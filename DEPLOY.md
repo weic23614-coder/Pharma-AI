@@ -42,7 +42,7 @@ pip install -r requirements.txt
 ```bash
 # 基础
 export HOST=0.0.0.0
-export PORT=8088
+export PORT=8089
 
 # AI（可选）
 export ENABLE_AI_BRAIN=true
@@ -61,7 +61,7 @@ export BAILIAN_TIMEOUT_SEC=1.2
 ```bash
 cd /opt/zhinengzuhuo
 source .venv/bin/activate
-uvicorn app.main:app --host 0.0.0.0 --port 8088 --reload
+uvicorn app.main:app --host 0.0.0.0 --port 8089 --reload
 ```
 
 ### 5.2 生产启动（推荐）
@@ -69,7 +69,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8088 --reload
 ```bash
 cd /opt/zhinengzuhuo
 source .venv/bin/activate
-uvicorn app.main:app --host 0.0.0.0 --port 8088
+uvicorn app.main:app --host 0.0.0.0 --port 8089
 ```
 
 ---
@@ -88,13 +88,13 @@ Type=simple
 User=www-data
 WorkingDirectory=/opt/zhinengzuhuo
 Environment="HOST=0.0.0.0"
-Environment="PORT=8088"
+Environment="PORT=8089"
 Environment="ENABLE_AI_BRAIN=true"
 Environment="BAILIAN_MODEL=qwen-plus"
 Environment="BAILIAN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1"
 Environment="BAILIAN_TIMEOUT_SEC=1.2"
 Environment="BAILIAN_API_KEY=替换为你的key"
-ExecStart=/opt/zhinengzuhuo/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8088
+ExecStart=/opt/zhinengzuhuo/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8089
 Restart=always
 RestartSec=3
 
@@ -123,7 +123,7 @@ server {
     server_name your-domain.com;
 
     location / {
-        proxy_pass http://127.0.0.1:8088;
+        proxy_pass http://127.0.0.1:8089;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -140,9 +140,9 @@ server {
 部署后至少验证以下接口：
 
 ```bash
-curl -s http://127.0.0.1:8088/health
-curl -s http://127.0.0.1:8088/api/admin/ai-status
-curl -s http://127.0.0.1:8088/api/admin/metrics
+curl -s http://127.0.0.1:8089/health
+curl -s http://127.0.0.1:8089/api/admin/ai-status
+curl -s http://127.0.0.1:8089/api/admin/metrics
 ```
 
 浏览器验证：
@@ -187,10 +187,10 @@ curl -s http://127.0.0.1:8088/api/admin/metrics
 
 ```bash
 export APP_DB_PATH="/var/lib/zhinengzuhuo/app.db"   # 固定路径，避免重启丢数据
-uvicorn app.main:app --host 0.0.0.0 --port 8088
+uvicorn app.main:app --host 0.0.0.0 --port 8089
 ```
 
-前面仍可挂 **Nginx** 反代到 `127.0.0.1:8088`，对外只开 443。
+前面仍可挂 **Nginx** 反代到 `127.0.0.1:8089`，对外只开 443。
 
 ### 11.2 推荐架构（MVP → 小规模真实使用）
 

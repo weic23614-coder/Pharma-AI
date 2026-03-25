@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 手动开发启动：固定端口 8089（与文档中的 8088 不同也没关系，以本脚本为准）
+# 本机开发启动：默认端口 8089，仅监听 127.0.0.1（与文档约定一致）
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"

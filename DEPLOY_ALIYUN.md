@@ -27,7 +27,7 @@
 | **80** | HTTP（证书验证、跳转 HTTPS） | `0.0.0.0/0` 或按需收紧 |
 | **443** | HTTPS 对外服务 | `0.0.0.0/0` |
 
-**不要**把 **8088** 对全网开放（若用 Nginx 反代，只本机访问 8088 即可）。
+**不要**把 **8089** 对全网开放（若用 Nginx 反代，只本机访问 8089 即可）。
 
 ---
 
@@ -89,7 +89,7 @@ chown -R www-data:www-data /var/lib/zhinengzuhuo
 ```bash
 APP_DB_PATH=/var/lib/zhinengzuhuo/app.db
 HOST=0.0.0.0
-PORT=8088
+PORT=8089
 # 可选：服务端百炼（也可只在后台页面配置，二选一即可）
 # ENABLE_AI_BRAIN=true
 # BAILIAN_API_KEY=你的key
@@ -115,7 +115,7 @@ User=www-data
 Group=www-data
 WorkingDirectory=/opt/zhinengzuhuo
 EnvironmentFile=/etc/zhinengzuhuo.env
-ExecStart=/opt/zhinengzuhuo/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8088
+ExecStart=/opt/zhinengzuhuo/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8089
 Restart=always
 RestartSec=3
 
@@ -136,7 +136,7 @@ systemctl status zhinengzuhuo
 本机验收：
 
 ```bash
-curl -s http://127.0.0.1:8088/health
+curl -s http://127.0.0.1:8089/health
 ```
 
 ---
@@ -157,7 +157,7 @@ server {
     server_name 你的域名.com;
 
     location / {
-        proxy_pass http://127.0.0.1:8088;
+        proxy_pass http://127.0.0.1:8089;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -223,7 +223,7 @@ curl -s https://你的域名.com/health
 | 现象 | 处理 |
 |------|------|
 | 外网打不开 | 查安全组是否放行 80/443；`systemctl status zhinengzuhuo`、`nginx -t` |
-| 502 Bad Gateway | uvicorn 未启动或端口不是 8088 |
+| 502 Bad Gateway | uvicorn 未启动或端口不是 8089 |
 | 上传 Excel 失败 | `client_max_body_size` 调大（上文已示例 50m） |
 | 数据库丢了 | 是否把 `APP_DB_PATH` 指到临时目录；应固定到 `/var/lib/zhinengzuhuo/` 并做快照 |
 

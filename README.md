@@ -1,112 +1,177 @@
-# 1药网 AI 智能组货与动态定价引擎（本地可用版）
+# Pharma-AI · 医药零售智能组货与动态定价引擎
 
-这是一个可直接演示、可灰度接入、可二次开发的本地 MVP，面向结算场景提供智能组货与换购定价能力。
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/API-FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 
-核心能力：
+**面向医药电商结算场景的本地可运行 MVP**：在「主品 + 候选副品池」输入下，输出**推荐 SKU、医学逻辑标签、医嘱式文案、换购价与预计毛利**；带运营后台、策略与商品池管理、AB 实验与指标、事件回传；可选接入**阿里云百炼（DashScope）**，模型异常时**自动回退规则引擎**。
 
-- 结算侧推荐 API（输入主品 + 候选池，输出推荐 SKU、医嘱文案、换购价、预计毛利）
-- 高并发兜底（超时降级，不阻断交易主链路）
-- 高频类目缓存（24h，降低模型调用成本）
-- 运营后台（策略、商品池、策略版本、AB 实验、指标看板、在线 Demo）
-- 事件回传（曝光/点击/加购下单）与 AB 报表
-- AI 接入（百炼优先，规则兜底）
+|  |  |
+|--|--|
+| **主仓库（本页）** | [github.com/weic23614-coder/Pharma-AI](https://github.com/weic23614-coder/Pharma-AI) |
+| **历史备份** | [zhinengzuhuo](https://github.com/weic23614-coder/zhinengzuhuo)（同一代码线，可择一为主远程） |
 
 ---
 
-## 1. 快速开始
+## 目录
 
-### 1.1 环境要求
+- [适用场景与边界](#适用场景与边界)
+- [能力一览](#能力一览)
+- [架构说明](#架构说明)
+- [技术栈](#技术栈)
+- [快速开始](#快速开始)
+- [访问地址与端口约定](#访问地址与端口约定)
+- [如何把页面分享给他人](#如何把页面分享给他人)
+- [与业务系统对接](#与业务系统对接)
+- [推荐 API 示例](#推荐-api-示例)
+- [智能组货引擎分层](#智能组货引擎分层)
+- [API 与配套文档](#api-与配套文档)
+- [订单与库存数据导入](#订单与库存数据导入)
+- [百炼 AI 配置](#百炼-ai-配置)
+- [常见问题](#常见问题)
+- [生产化方向](#生产化方向)
+- [协作与推送](#协作与推送)
 
-- Python 3.10+
-- macOS / Linux（Windows 可用 WSL）
-- 可选：阿里云 DashScope API Key（启用 AI 推荐时需要）
+---
 
-### 1.2 启动服务
+## 适用场景与边界
 
-```bash
-cd /Users/weipeng/zhinengzuhuo-backup
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8088
+**适合**
+
+- 结算页 / 换购模块的**智能组货与定价**演示与联调
+- 运营配置**类目策略、商品池、策略版本、AB 实验**
+- 用真实 Excel 清单做**导入 → 生成草稿策略 → 确认 → 同步**
+
+**不适合（需另行建设）**
+
+- **GitHub Pages 静态托管本后台**：后台依赖 Python 进程与 SQLite，静态 Pages **无法**直接运行本服务（静态「日报」类 HTML 可单独用 Pages）。
+- **无鉴权公网演示**：默认无登录；外网暴露前请自行加网关、HTTPS、IP 白名单或 VPN。
+
+---
+
+## 能力一览
+
+| 模块 | 说明 |
+|------|------|
+| **推荐 API** | `POST /api/recommend`：主品 + 候选池 → 推荐结果与定价 |
+| **高并发兜底** | 外部模型超时后降级，不阻断交易主链路 |
+| **类目缓存** | 高频类目推荐结果 24h 缓存，降低成本 |
+| **运营后台** | `/admin`：策略、商品池、版本、AB、指标、在线 Demo |
+| **事件与 AB** | `POST /api/events` 曝光/点击/加购；AB 报表接口 |
+| **运营工作台** | Excel 上传 → AI/规则生成组货草稿 → 确认 → 同步至规则表 |
+| **AI + 规则** | 百炼优先；失败或关闭 AI 时走 `bundle_engine` 规则引擎 |
+
+---
+
+## 架构说明
+
+```mermaid
+flowchart LR
+  subgraph client [调用方]
+    FE[结算前端]
+    OPS[运营浏览器]
+  end
+  subgraph api [FastAPI app.main]
+    R["/api/recommend"]
+    E["/api/events"]
+    ADM["/admin + /api/admin/*"]
+    OPSAPI["/api/ops/*"]
+  end
+  subgraph logic [决策]
+    AI[ai_brain 百炼]
+    ENG[bundle_engine 规则]
+    CACHE[(类目缓存 SQLite)]
+    DB[(app.db)]
+  end
+  FE --> R
+  FE --> E
+  OPS --> ADM
+  OPS --> OPSAPI
+  R --> AI
+  R --> ENG
+  AI --> ENG
+  ENG --> CACHE
+  ADM --> DB
+  OPSAPI --> DB
 ```
 
-访问地址：
+---
 
-- 后台页面：`http://127.0.0.1:8088/admin`
-- 健康检查：`http://127.0.0.1:8088/health`
-- OpenAPI 文档：`http://127.0.0.1:8088/docs`
+## 技术栈
 
-### 1.3 固定用 8089 + 重启后自动起来（本机 macOS）
+- **运行时**：Python 3.10+
+- **Web**：FastAPI、Uvicorn、Jinja2、Starlette
+- **数据**：SQLite（`app.db`，含策略、商品、缓存、AB、运营批次等）
+- **可选 AI**：OpenAI 兼容客户端 → 阿里云 DashScope（百炼）
+- **导入**：openpyxl（Excel）
 
-日常手动启动（带热重载，端口默认 **8089**）：
+---
+
+## 快速开始
 
 ```bash
+git clone https://github.com/weic23614-coder/Pharma-AI.git
+cd Pharma-AI
+
+python3 -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+
+# 推荐：脚本默认端口 8089
+chmod +x scripts/*.sh
 ./scripts/start-dev.sh
 ```
 
-需要 **登录后自动监听 8089**（无热重载，进程挂了会自动拉起）时，在仓库根目录执行一次：
+等价手动启动：
 
 ```bash
-./scripts/install-login-startup.sh
+source .venv/bin/activate
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8089
 ```
 
-卸载自启动：`./scripts/uninstall-login-startup.sh`。日志目录：`.logs/`（已加入 `.gitignore`）。
-
-### 1.4 同一局域网内给其他同事访问（macOS）
-
-要点：**不能用只监听本机的地址**。需 `--host 0.0.0.0`，同事浏览器里用「你这台电脑的局域网 IP + 端口」。
-
-一键启动（默认 **8089**，并打印本机推测的局域网 IP）：
-
-```bash
-./scripts/start-lan.sh
-```
-
-同事打开终端里提示的 **`http://<你的局域网IP>:8089/admin`** 即可（需与你在**同一 Wi‑Fi 或同一有线网段**；公司 VPN 有时会隔离，需以实际网络为准）。
-
-若本机开了 **macOS 防火墙**（系统设置 → 网络 → 防火墙），首次可能被拦截，需在弹出框中允许 **Python** 入站，或为测试暂时关闭防火墙（遵守公司安全规定）。
-
-**安全提示**：当前 MVP 后台与接口多为**内网演示**场景；暴露到局域网意味着同网段的人可访问，请勿在公网裸奔。更正式的对外发布见仓库根目录 `DEPLOY.md`（Nginx、HTTPS 等）。
+**macOS 登录后自动拉起（无热重载）**：`./scripts/install-login-startup.sh`  
+卸载：`./scripts/uninstall-login-startup.sh`（日志目录 `.logs/`）
 
 ---
 
-## 2. 项目目录结构
+## 访问地址与端口约定
 
-```text
-zhinengzuhuo-backup/
-├── app/
-│   ├── main.py                  # API 入口、路由、缓存、AB 分流
-│   ├── bundle_engine.py         # 规则引擎（过滤/召回/评分/定价/文案）
-│   ├── ai_brain.py              # LLM 调用封装（百炼）
-│   └── templates/admin.html     # 运营后台页面
-├── scripts/
-│   ├── start-dev.sh                 # 本机开发启动（默认 8089，仅 127.0.0.1）
-│   ├── start-lan.sh                 # 局域网可访问（0.0.0.0:8089）
-│   ├── install-login-startup.sh     # macOS 登录自启动（8089）
-│   ├── uninstall-login-startup.sh
-│   └── import_sales_catalog.py      # 商品清单导入脚本
-├── requirements.txt
-└── README.md
-```
+**约定开发端口：`8089`**（与 `scripts/start-dev.sh`、`start-lan.sh` 一致）。
+
+| 用途 | URL |
+|------|-----|
+| 运营后台 | http://127.0.0.1:8089/admin |
+| 健康检查 | http://127.0.0.1:8089/health |
+| OpenAPI | http://127.0.0.1:8089/docs |
 
 ---
 
-## 3. 与 1药网现有系统对接路径
+## 如何把页面分享给他人
 
-1. C 端进入结算页，原有结算 API 保持不变。
-2. 结算服务并行异步调用本服务 `POST /api/recommend`。
-3. 本服务命中缓存则直接返回；未命中则进行实时推荐。
-4. 前端渲染推荐卡片，用户勾选后按换购价加购 SKU。
-5. 超时或异常时返回 `fallback=skip_module`，前端直接隐藏推荐卡片，不影响主流程。
+| 场景 | 操作 |
+|------|------|
+| **同一局域网** | `./scripts/start-lan.sh`，同事访问 `http://<你的局域网IP>:8089/admin` |
+| **临时公网演示**（可信对象、短时间） | 终端 1：`./scripts/start-dev.sh`；终端 2：`./scripts/share-public-tunnel.sh`（需安装 [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)），将输出的 `https://….trycloudflare.com` 发给对方并访问 `…/admin` |
+| **正式对外** | 见仓库内 [DEPLOY.md](DEPLOY.md)、[DEPLOY_ALIYUN.md](DEPLOY_ALIYUN.md)（Nginx、HTTPS、进程守护等） |
+
+**请勿**将 GitHub Personal Access Token 粘贴给第三方聊天工具；推送代码在本机用 SSH 或已配置的凭据完成。
 
 ---
 
-## 4. 推荐 API（核心）
+## 与业务系统对接
+
+1. C 端进入结算页，**原有结算 API 不变**。
+2. 结算服务**并行异步**调用 `POST /api/recommend`。
+3. 命中缓存则直接返回；否则实时计算推荐。
+4. 前端展示换购卡片；用户勾选后按换购价加购。
+5. 超时或异常时响应中带 `fallback=skip_module`，前端**隐藏模块**即可，主流程不受影响。
+
+---
+
+## 推荐 API 示例
 
 `POST /api/recommend`
 
-请求体（示例）：
+**请求（节选）**
 
 ```json
 {
@@ -129,14 +194,14 @@ zhinengzuhuo-backup/
 }
 ```
 
-返回体（示例）：
+**响应（节选）**
 
 ```json
 {
   "recommendation": {
     "selected_sku_id": "B901",
     "medical_logic": "慢病管理",
-    "sales_copy": "【药师建议】......",
+    "sales_copy": "【药师建议】……",
     "pricing_strategy": {
       "addon_price": 108.78,
       "display_tag": "加109元换购价"
@@ -146,101 +211,76 @@ zhinengzuhuo-backup/
 }
 ```
 
-推荐响应关键字段：
-
-- `selected_sku_id`：命中的副品 SKU
-- `medical_logic`：医学推荐逻辑标签（用于合规解释）
-- `sales_copy`：前台展示文案
-- `pricing_strategy.addon_price`：最终换购价
-- `projected_profit`：预计毛利（用于运营评估）
+更多 curl / 字段说明见 **[API_EXAMPLES.md](API_EXAMPLES.md)**。
 
 ---
 
-## 5. 智能组货引擎设计
+## 智能组货引擎分层
 
-核心逻辑在 `app/bundle_engine.py`，采用分层处理：
+核心实现：`app/bundle_engine.py`
 
-- 拦截层：医学安全过滤（不符合主品医学逻辑的副品直接剔除）
-- 召回层：优先使用入参候选池，兜底从商品池召回
-- 评分层：`医学匹配 + 毛利贡献 + 可负担性` 综合评分
-- 定价层：`max(成本底价, 锚定价)` 生成换购价
-- 文案层：医嘱式文案 + 禁用词过滤
+1. **拦截层**：医学安全过滤，剔除与主品逻辑不匹配的副品  
+2. **召回层**：优先请求内候选池，不足时从商品池兜底  
+3. **评分层**：医学匹配 + 毛利贡献 + 可负担性  
+4. **定价层**：`max(成本底价, 锚定价)` → 换购价  
+5. **文案层**：医嘱式文案 + 禁用词过滤  
 
-`app/main.py` 主要负责接口编排、缓存、日志与 AB 分流，后续扩品类可通过配置与数据驱动，不必大改流程代码。
-
----
-
-## 6. 运营后台能力（当前版本）
-
-- 类目策略：类目、医学逻辑、医嘱提示、毛利率、启停状态
-- 商品池：主品与副品统一维护（SKU、成本、原价、毛利率）
-- 策略版本：草稿/发布管理，支持快速回滚
-- AB 实验：A/B 流量比例配置，输出 Variant 级报表
-- 指标总览：请求量、成功率、缓存命中率、CTR、CVR、加购销售额、加购毛利
-- 在线 Demo：降糖药/高血压药一键触发 + 漏斗事件模拟
+`app/main.py` 负责路由、缓存、日志、AB 分流与文件上传等编排。
 
 ---
 
-## 7. API 一览
+## API 与配套文档
 
-### 7.1 推荐与事件
+**推荐与事件**
 
-- `POST /api/recommend`：核心推荐接口
-- `POST /api/events`：上报曝光/点击/加购事件
+- `POST /api/recommend`
+- `POST /api/events`
 
-### 7.2 后台管理
+**后台管理**
 
-- `GET /api/admin/metrics`：总览指标
-- `GET/POST /api/admin/policies`：类目策略管理
-- `GET/POST /api/admin/products`：商品池管理
-- `GET/POST /api/admin/strategies`：策略版本管理
-- `POST /api/admin/strategies/{id}/publish`：发布版本
-- `GET/POST /api/admin/experiments`：AB 实验管理
-- `GET /api/admin/ab-report`：AB 报表
-- `GET /api/admin/ai-status`：AI 开关和模型状态
+- `GET /api/admin/metrics`
+- `GET/POST /api/admin/policies`、`/products`、`/strategies`
+- `POST /api/admin/strategies/{id}/publish`
+- `GET/POST /api/admin/experiments`
+- `GET /api/admin/ab-report`
+- `GET /api/admin/ai-status`
 
-### 7.3 运营快捷工作台
+**运营快捷工作台**
 
-- `POST /api/ops/upload-catalog`：上传清单，返回 `batch_id`
-- `POST /api/ops/generate-strategies?batch_id=...`：自动生成策略
-- `GET /api/ops/strategies?batch_id=...`：查看策略列表
-- `POST /api/ops/strategies/{id}/confirm`：确认单条策略
-- `POST /api/ops/sync?batch_id=...`：同步已确认策略到 `bundle_rules`
-- `GET /api/ops/workbench?batch_id=...`：查看批次进度
+- `POST /api/ops/upload-catalog`
+- `POST /api/ops/generate-strategies?batch_id=...`
+- `GET /api/ops/strategies?batch_id=...`
+- `POST /api/ops/strategies/{id}/confirm`
+- `POST /api/ops/sync?batch_id=...`
+- `GET /api/ops/workbench?batch_id=...`
+
+**仓库内文档**
+
+- [API_EXAMPLES.md](API_EXAMPLES.md) — 接口调用样例  
+- [DEPLOY.md](DEPLOY.md) — 通用部署思路  
+- [DEPLOY_ALIYUN.md](DEPLOY_ALIYUN.md) — 阿里云相关说明  
 
 ---
 
-## 8. 订单清单导入（昨天售卖商品）
-
-导入脚本：`scripts/import_sales_catalog.py`
-
-示例：
+## 订单与库存数据导入
 
 ```bash
-cd /Users/weipeng/zhinengzuhuo-backup
+cd Pharma-AI
 source .venv/bin/activate
 python scripts/import_sales_catalog.py \
-  --excel "/Users/weipeng/Desktop/你的订单清单.xlsx" \
+  --excel "/path/to/订单清单.xlsx" \
   --default-role main
 ```
 
-说明：
+- 自动识别常见中文表头（SKU、名称、类目、价格、成本、销量等）  
+- 缺成本时可按 `价格 × default-cost-rate`（默认 0.78）估算  
+- 写入 `products` 表，按 SKU **upsert**
 
-- 自动识别常见中文表头（SKU、商品名称、类目、价格、成本、销量）
-- 如缺少成本，按 `价格 * default-cost-rate` 估算（默认 0.78）
-- 导入目标为 `products` 表，按 SKU upsert（存在即更新）
+（若使用运营工作台中的库存相关接口，需在后台按页面指引上传对应 Excel。）
 
 ---
 
-## 9. 接入百炼大模型（AI优先，规则兜底）
-
-推荐链路：
-
-1. 优先调用百炼模型做选品与文案
-2. 本地引擎负责价格与毛利约束
-3. 模型异常/超时时自动回退规则引擎
-
-环境变量（示例）：
+## 百炼 AI 配置
 
 ```bash
 export ENABLE_AI_BRAIN=true
@@ -250,68 +290,34 @@ export BAILIAN_BASE_URL="https://dashscope.aliyuncs.com/compatible-mode/v1"
 export BAILIAN_TIMEOUT_SEC=1.2
 ```
 
-建议：
-
-- 线上环境请使用密钥管理服务，不要明文写入仓库
-- 建议设置超时 `1.0 ~ 1.5s`，超时后快速回退规则兜底
-- 发生 key 泄露时务必立即旋转并废弃旧 key
+使用 `GET /api/admin/ai-status` 检查开关与连通性。**勿将密钥提交到 Git**；生产环境请用密钥管理服务。
 
 ---
 
-## 10. 端到端演示流程（给运营/业务看）
+## 常见问题
 
-1. 启动服务并打开后台 `http://127.0.0.1:8088/admin`
-2. 在“商品池”导入或维护主品/副品
-3. 在“类目策略”配置医学逻辑与毛利目标
-4. 在“运营快捷工作台”上传 Excel 并生成策略草稿
-5. 逐条确认策略后执行一键同步
-6. 通过 Demo 触发推荐并观察漏斗数据变化
-7. 检查 AB 报表，对比 Variant 表现
-
----
-
-## 11. 常见问题排查
-
-- **服务启动失败**
-  - 检查 Python 版本与虚拟环境是否激活
-  - 重新执行 `pip install -r requirements.txt`
-- **推荐结果为空**
-  - 检查 `main_item.category` 与策略类目是否匹配
-  - 检查候选池是否有可用副品、成本/原价字段是否完整
-- **AI 不生效**
-  - 检查 `ENABLE_AI_BRAIN=true`
-  - 调用 `GET /api/admin/ai-status` 检查模型连通
-- **推荐变慢**
-  - 检查外部模型超时设置和网络波动
-  - 观察缓存命中率与降级比例
+| 现象 | 排查 |
+|------|------|
+| 后台无法打开 | 确认服务已启动且端口为 **8089**；`lsof -i :8089` |
+| 推荐为空 | 主品 `category` 是否与策略类目一致；候选池字段是否完整 |
+| AI 不生效 | `ENABLE_AI_BRAIN`、环境变量、`/api/admin/ai-status` |
+| 局域网无法访问 | 是否使用 `start-lan.sh`；防火墙是否放行；是否同网段/VPN 隔离 |
 
 ---
 
-## 12. 生产化建议（下一步）
+## 生产化方向
 
-- 接入企业内部 LLM 网关并做统一可观测（延迟、成功率、Token 成本）
-- 增加人工审核流：新策略先灰度，观察指标后再全量
-- 增加 AB 维度：人群、类目、文案、价格多维实验
-- 打通订单回传，计算真实 CVR、增量 GMV、增量毛利
-- 建立安全治理：密钥轮换、日志脱敏、权限分层
-
----
-
-## 13. GitHub 备份仓库
-
-当前项目已备份到：
-
-- [https://github.com/weic23614-coder/zhinengzuhuo](https://github.com/weic23614-coder/zhinengzuhuo)
-
-建议后续流程：
-
-1. 每次需求迭代先新建分支
-2. 功能完成后提 PR 自检
-3. 合并到 `main` 前跑一遍接口回归与 Demo 冒烟
+- 接入企业 LLM 网关与统一可观测（延迟、成功率、Token 成本）  
+- 策略审核与灰度发布  
+- 多维 AB、订单回传计算真实 CVR 与毛利  
+- 密钥轮换、日志脱敏、后台鉴权与审计  
 
 ---
 
-## 14. 配套文档
+## 协作与推送
 
-- 部署手册：`DEPLOY.md`
-- API 调用样例：`API_EXAMPLES.md`
+1. 以 **[Pharma-AI](https://github.com/weic23614-coder/Pharma-AI)** 为主展示与协作入口（本 README 即仓库首页介绍）。  
+2. 功能分支开发 → PR 自检 → 合并 `main`。  
+3. 合并前建议跑通 `/health`、`/docs` 与后台 Demo 冒烟。  
+
+若本地目录名与克隆名不同（例如 `1yaowang-ai-mvp`），将更新后的 `README.md` 复制或推送至本仓库即可，内容以本文件为准。

@@ -1,13 +1,13 @@
 # API 调用示例（API_EXAMPLES）
 
-本文档提供可直接复制执行的接口样例，默认服务地址：`http://127.0.0.1:8088`。
+本文档提供可直接复制执行的接口样例，默认服务地址：`http://127.0.0.1:8089`。
 
 ---
 
 ## 1. 健康检查
 
 ```bash
-curl -s http://127.0.0.1:8088/health
+curl -s http://127.0.0.1:8089/health
 ```
 
 ---
@@ -17,7 +17,7 @@ curl -s http://127.0.0.1:8088/health
 ### 2.1 请求示例
 
 ```bash
-curl -s -X POST "http://127.0.0.1:8088/api/recommend" \
+curl -s -X POST "http://127.0.0.1:8089/api/recommend" \
   -H "Content-Type: application/json" \
   -d '{
     "user_intent": "checkout",
@@ -69,7 +69,7 @@ curl -s -X POST "http://127.0.0.1:8088/api/recommend" \
 ### 3.1 曝光事件
 
 ```bash
-curl -s -X POST "http://127.0.0.1:8088/api/events" \
+curl -s -X POST "http://127.0.0.1:8089/api/events" \
   -H "Content-Type: application/json" \
   -d '{
     "event_type": "exposure",
@@ -84,7 +84,7 @@ curl -s -X POST "http://127.0.0.1:8088/api/events" \
 ### 3.2 点击事件
 
 ```bash
-curl -s -X POST "http://127.0.0.1:8088/api/events" \
+curl -s -X POST "http://127.0.0.1:8089/api/events" \
   -H "Content-Type: application/json" \
   -d '{
     "event_type": "click",
@@ -99,7 +99,7 @@ curl -s -X POST "http://127.0.0.1:8088/api/events" \
 ### 3.3 加购事件
 
 ```bash
-curl -s -X POST "http://127.0.0.1:8088/api/events" \
+curl -s -X POST "http://127.0.0.1:8089/api/events" \
   -H "Content-Type: application/json" \
   -d '{
     "event_type": "add_to_cart",
@@ -118,13 +118,13 @@ curl -s -X POST "http://127.0.0.1:8088/api/events" \
 ### 4.1 总览指标
 
 ```bash
-curl -s "http://127.0.0.1:8088/api/admin/metrics"
+curl -s "http://127.0.0.1:8089/api/admin/metrics"
 ```
 
 ### 4.2 AB 报表
 
 ```bash
-curl -s "http://127.0.0.1:8088/api/admin/ab-report"
+curl -s "http://127.0.0.1:8089/api/admin/ab-report"
 ```
 
 ---
@@ -136,7 +136,7 @@ curl -s "http://127.0.0.1:8088/api/admin/ab-report"
 ### 5.1 新增类目策略
 
 ```bash
-curl -s -X POST "http://127.0.0.1:8088/api/admin/policies" \
+curl -s -X POST "http://127.0.0.1:8089/api/admin/policies" \
   -H "Content-Type: application/json" \
   -d '{
     "category": "高血压药",
@@ -150,7 +150,7 @@ curl -s -X POST "http://127.0.0.1:8088/api/admin/policies" \
 ### 5.2 新增商品
 
 ```bash
-curl -s -X POST "http://127.0.0.1:8088/api/admin/products" \
+curl -s -X POST "http://127.0.0.1:8089/api/admin/products" \
   -H "Content-Type: application/json" \
   -d '{
     "sku_id": "B901",
@@ -170,38 +170,38 @@ curl -s -X POST "http://127.0.0.1:8088/api/admin/products" \
 ### 6.1 上传商品清单
 
 ```bash
-curl -s -X POST "http://127.0.0.1:8088/api/ops/upload-catalog" \
+curl -s -X POST "http://127.0.0.1:8089/api/ops/upload-catalog" \
   -F "file=@/Users/weipeng/Desktop/你的订单清单.xlsx"
 ```
 
 ### 6.2 根据 batch 生成策略
 
 ```bash
-curl -s -X POST "http://127.0.0.1:8088/api/ops/generate-strategies?batch_id=your_batch_id"
+curl -s -X POST "http://127.0.0.1:8089/api/ops/generate-strategies?batch_id=your_batch_id"
 ```
 
 ### 6.3 查看策略列表
 
 ```bash
-curl -s "http://127.0.0.1:8088/api/ops/strategies?batch_id=your_batch_id"
+curl -s "http://127.0.0.1:8089/api/ops/strategies?batch_id=your_batch_id"
 ```
 
 ### 6.4 确认单条策略
 
 ```bash
-curl -s -X POST "http://127.0.0.1:8088/api/ops/strategies/your_strategy_id/confirm"
+curl -s -X POST "http://127.0.0.1:8089/api/ops/strategies/your_strategy_id/confirm"
 ```
 
 ### 6.5 同步已确认策略
 
 ```bash
-curl -s -X POST "http://127.0.0.1:8088/api/ops/sync?batch_id=your_batch_id"
+curl -s -X POST "http://127.0.0.1:8089/api/ops/sync?batch_id=your_batch_id"
 ```
 
 ### 6.6 查询批次进度
 
 ```bash
-curl -s "http://127.0.0.1:8088/api/ops/workbench?batch_id=your_batch_id"
+curl -s "http://127.0.0.1:8089/api/ops/workbench?batch_id=your_batch_id"
 ```
 
 ---
@@ -209,7 +209,7 @@ curl -s "http://127.0.0.1:8088/api/ops/workbench?batch_id=your_batch_id"
 ## 7. AI 状态检查
 
 ```bash
-curl -s "http://127.0.0.1:8088/api/admin/ai-status"
+curl -s "http://127.0.0.1:8089/api/admin/ai-status"
 ```
 
 如果返回 AI 未启用，请检查：
@@ -225,7 +225,7 @@ curl -s "http://127.0.0.1:8088/api/admin/ai-status"
 ```python
 import requests
 
-url = "http://127.0.0.1:8088/api/recommend"
+url = "http://127.0.0.1:8089/api/recommend"
 payload = {
     "user_intent": "checkout",
     "main_item": {

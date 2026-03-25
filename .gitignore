@@ -9,12 +9,8 @@ __pycache__/
 
 # local runtime artifacts
 app.db
-app_runtime.db
-app_runtime.db-shm
-app_runtime.db-wal
 *.sqlite
 *.sqlite3
-tmp_*.xlsx
 
 # logs
 *.log
