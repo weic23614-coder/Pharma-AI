@@ -44,6 +44,26 @@
     .seq-cell { text-align:center; color:#64748b; width:52px; }
     .selling-point { font-size:13px; line-height:1.45; color:#334155; white-space:pre-wrap; word-break:break-word; max-width:320px; }
     .view { display:none; } .view.active { display:block; }
+    /* modal */
+    .modal-mask { position:fixed; inset:0; background:rgba(15,23,42,.55); display:none; align-items:flex-start; justify-content:center; padding:34px 18px; z-index:999; }
+    .modal-mask.show { display:flex; }
+    .modal { width:min(980px, 100%); background:#fff; border-radius:16px; border:1px solid var(--line); box-shadow:0 22px 60px rgba(2,6,23,.35); overflow:hidden; }
+    .modal-head { display:flex; justify-content:space-between; align-items:center; padding:14px 16px; border-bottom:1px solid var(--line); background:#fbfdff; }
+    .modal-title { font-weight:800; color:#0f172a; }
+    .modal-body { padding:14px 16px 18px; max-height:72vh; overflow:auto; }
+    .modal-body h3 { margin:14px 0 8px; font-size:15px; }
+    .modal-body p { margin:8px 0; color:#334155; line-height:1.55; font-size:13px; }
+    .modal-body .muted { color:#64748b; }
+    .rule-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+    .rule-card { border:1px solid #e8eef7; background:#fff; border-radius:12px; padding:10px 12px; }
+    .rule-card .k { font-size:12px; color:#64748b; }
+    .rule-card .v { margin-top:6px; font-size:13px; color:#0f172a; font-weight:600; line-height:1.5; }
+    .bar { height:10px; background:#eef2ff; border-radius:999px; overflow:hidden; border:1px solid #e6ebf2; }
+    .bar > span { display:block; height:100%; background:linear-gradient(90deg, #2b7fff, #60a5fa); }
+    .bar.gray > span { background:linear-gradient(90deg,#94a3b8,#cbd5e1); }
+    .tbl { width:100%; border-collapse:collapse; margin-top:6px; }
+    .tbl td, .tbl th { border:1px solid #e8eef7; padding:8px; font-size:12px; }
+    .tbl th { background:#f8fbff; color:#475569; }
   </style>
 </head>
 <body>
@@ -53,13 +73,18 @@
       <div class="menu">
         <button class="menu-item" id="menu-inventory" onclick="switchView('inventory')">库存清单</button>
         <button class="menu-item active" id="menu-bundle" onclick="switchView('bundle')">智能组货</button>
+        <button class="menu-item" id="menu-pricing" onclick="switchView('pricing')">定价助手</button>
         <button class="menu-item" id="menu-budget" onclick="switchView('budget')">预算与消耗</button>
       </div>
     </aside>
     <main class="content">
       <div class="topbar">
         <div><div class="title" id="pageTitle">智能组货建议</div><div class="sub" id="pageSub">上传待组货商品后，从库存清单碰撞并生成AI组货建议。</div></div>
-        <div class="actions"><button class="btn" onclick="handleRefresh()">刷新</button><button class="btn primary" id="btnMainAction" onclick="opsSync()">一键同步已确认策略</button></div>
+        <div class="actions">
+          <button class="btn" onclick="openExplain()">解释</button>
+          <button class="btn" onclick="handleRefresh()">刷新</button>
+          <button class="btn primary" id="btnMainAction" onclick="opsSync()">一键同步已确认策略</button>
+        </div>
       </div>
       <div id="aiNotice" class="notice warn">AI状态检测中...</div>
 
@@ -68,7 +93,7 @@
           <div class="pipeline">
             <div class="field"><label>上传库存清单（全量SKU）</label><input id="inventoryFile" type="file" accept=".xlsx,.xlsm,.xltx,.xltm" /></div>
             <div class="field"><label>默认角色</label><select id="defaultRole"><option value="addon">通用商品</option><option value="main">通用商品</option></select></div>
-            <div class="field"><label>说明</label><input value="主码列可为「主码」或「产品编码」；重新上传全量清单将按 sku 覆盖更新" disabled /></div>
+            <div class="field"><label>说明</label><input value="库存清单就是商品库唯一维护入口" disabled /></div>
             <div class="inline-actions"><button class="btn primary" onclick="uploadInventory()">更新库存清单</button></div>
           </div>
           <div id="inventoryStats" class="summary">库存：-</div>
@@ -81,7 +106,7 @@
             <div class="inline-actions"><button class="btn" onclick="loadInventoryList()">查询</button></div>
           </div>
           <table style="margin-top:8px;">
-            <thead><tr><th class="seq-cell">序号</th><th>科室</th><th>主码</th><th>商品编码</th><th>一级类目</th><th>产品名称</th><th>生产厂家</th></tr></thead>
+            <thead><tr><th class="seq-cell">序号</th><th>科室</th><th>产品编码</th><th>商品编码</th><th>一级类目</th><th>产品名称</th><th>生产厂家</th></tr></thead>
             <tbody id="inventoryTable"></tbody>
           </table>
           <div class="pager">
@@ -121,6 +146,43 @@
         </section>
       </section>
 
+      <section class="view" id="view-pricing">
+        <section class="panel">
+          <div class="pipeline" style="grid-template-columns:1fr 240px auto;align-items:end;margin-bottom:10px;">
+            <div class="field"><label>上传待定价商品（Excel）</label><input id="pricingFile" type="file" accept=".xlsx,.xlsm,.xltx,.xltm" onchange="onPricingFileChange()" /></div>
+            <div class="field"><label>说明</label><input value="定价批次独立于智能组货；库存清单可交叉复用" disabled /></div>
+            <div class="inline-actions"><button type="button" class="btn" onclick="pricingUpload()">上传定价批次</button></div>
+          </div>
+          <div id="pricingBatch" class="summary">尚未上传定价批次。</div>
+        </section>
+        <section class="panel">
+          <div class="section-title" style="flex-wrap:wrap;gap:8px;">
+            定价助手（销量权重 0.6 / 利润权重 0.4）
+            <div class="inline-actions" style="margin-left:auto;display:flex;gap:8px;">
+              <button type="button" id="pricingGenerateBtn" class="btn primary" onclick="pricingGenerate()">生成定价建议</button>
+              <button type="button" class="btn" onclick="pricingExportCsv()">导出调价清单CSV</button>
+              <button type="button" class="btn primary" onclick="pricingSync()">同步已确认建议</button>
+            </div>
+          </div>
+          <div class="pipeline" style="grid-template-columns:220px 220px 220px auto;align-items:end;">
+            <div class="field"><label>单次调价幅度上限</label><input id="pricingMaxAdj" type="number" value="10" min="1" max="30" /></div>
+            <div class="field"><label>软保护线（毛利率）</label><input id="pricingSoftFloor" type="number" value="5" min="0" max="50" /></div>
+            <div class="field"><label>规则主键</label><input value="产品名称+厂家+商品编码+标品主码" disabled /></div>
+            <div class="field"><label>说明</label><input value="低于保护线仍可降价（返利场景），但会自动收敛幅度" disabled /></div>
+          </div>
+          <div id="pricingSummary" class="summary">等待生成定价建议。</div>
+          <table style="margin-top:8px;">
+            <thead><tr><th>ID</th><th>产品名称</th><th>厂家</th><th>商品编码</th><th>标品主码</th><th>业务模式</th><th>当前单价</th><th>建议单价</th><th>调价幅度</th><th>当前毛利率</th><th>预测毛利率</th><th>建议说明</th><th>状态</th><th>操作</th></tr></thead>
+            <tbody id="pricingTable"></tbody>
+          </table>
+          <div class="pager">
+            <button class="btn" id="pricingPrevBtn" onclick="prevPricingPage()">上一页</button>
+            <span id="pricingPageInfo">第 1 页</span>
+            <button class="btn" id="pricingNextBtn" onclick="nextPricingPage()">下一页</button>
+          </div>
+        </section>
+      </section>
+
       <section class="view" id="view-budget">
         <section class="panel"><div class="section-title">AI 预算与消耗管理</div><div id="budgetCards" class="kpi-grid"></div></section>
         <section class="panel">
@@ -139,21 +201,200 @@
       </section>
     </main>
   </div>
+  <!-- explain modal -->
+  <div class="modal-mask" id="explainMask" onclick="closeExplain(event)">
+    <div class="modal" onclick="event.stopPropagation()">
+      <div class="modal-head">
+        <div class="modal-title" id="explainTitle">规则说明</div>
+        <button class="btn" onclick="closeExplain()">关闭</button>
+      </div>
+      <div class="modal-body" id="explainBody"></div>
+    </div>
+  </div>
   <script>
     window.__opsBatchId = null; window.__activeView = 'bundle';
+    window.__pricingBatchId = null;
     window.__invPage = 1; window.__invPageSize = 50; window.__invTotal = 0;
     window.__opsPage = 1; window.__opsPageSize = 50; window.__opsTotal = 0;
+    window.__pricingPage = 1; window.__pricingPageSize = 50; window.__pricingTotal = 0;
     function switchView(view) {
       window.__activeView = view;
-      ['inventory','bundle','budget'].forEach(v => { document.getElementById(`view-${v}`).classList.toggle('active', v===view); document.getElementById(`menu-${v}`).classList.toggle('active', v===view); });
-      const t = { inventory:['库存清单','库存清单是商品库唯一入口。'], bundle:['智能组货建议','上传待组货商品后，系统在库存清单中做商品碰撞生成AI建议（不区分主副品）。'], budget:['预算与消耗','查看Token消耗、预算使用率并切换模型。'] };
+      ['inventory','bundle','pricing','budget'].forEach(v => { document.getElementById(`view-${v}`).classList.toggle('active', v===view); document.getElementById(`menu-${v}`).classList.toggle('active', v===view); });
+      const t = {
+        inventory:['库存清单','库存清单是商品库唯一入口。'],
+        bundle:['智能组货建议','上传待组货商品后，生成组货建议。'],
+        pricing:['定价助手','基于销量+毛利的调价建议、确认与导出调价清单。'],
+        budget:['预算与消耗','查看Token消耗、预算使用率并切换模型。']
+      };
       document.getElementById('pageTitle').textContent = t[view][0]; document.getElementById('pageSub').textContent = t[view][1];
       const btn = document.getElementById('btnMainAction');
       if (view==='bundle') { btn.textContent='一键同步已确认策略'; btn.onclick=opsSync; }
+      else if (view==='pricing') { btn.textContent='一键同步已确认定价'; btn.onclick=pricingSync; }
       else if (view==='inventory') { btn.textContent='更新库存清单'; btn.onclick=uploadInventory; }
       else { btn.textContent='保存模型配置'; btn.onclick=saveBudgetSetting; }
     }
-    function handleRefresh(){ if(window.__activeView==='inventory') loadInventoryStats(); else if(window.__activeView==='budget') loadBudget(); else { opsRefresh(); loadMetrics(); } }
+    function closeExplain(e){
+      if (e && e.target && e.target.id && e.target.id !== 'explainMask') { /* inner click */ }
+      const m=document.getElementById('explainMask'); if(m) m.classList.remove('show');
+    }
+    function openExplain(){
+      const titleEl=document.getElementById('explainTitle');
+      const bodyEl=document.getElementById('explainBody');
+      const view = window.__activeView || 'bundle';
+      if(!titleEl || !bodyEl) return;
+      if(view==='bundle'){
+        titleEl.textContent = '智能组货｜规则说明（运营版）';
+        bodyEl.innerHTML = `
+          <p class="muted">目的：让运营知道“为什么这样搭”，以及哪些边界不会越界（安全/类目/多样性）。</p>
+          <div class="rule-grid">
+            <div class="rule-card"><div class="k">① 候选池</div><div class="v">优先用请求内候选池；批量生成时从库存清单（role=addon）召回副品候选。</div></div>
+            <div class="rule-card"><div class="k">② 医学安全门（拦截）</div><div class="v">主品类目归一到安全类（如 高血压/降糖/抗生素）；副品名/类目必须命中允许 token（如 血压计/益生菌/营养保健）。</div></div>
+            <div class="rule-card"><div class="k">③ 创口耗材降权</div><div class="v">纱布/棉签/碘伏等若无“外伤/术后/换药”语境，强降权，避免无理由狂搭耗材。</div></div>
+            <div class="rule-card"><div class="k">④ 评分：合理性优先</div><div class="v">医学匹配为主，毛利/可负担性仅作轻量 tie-break（本期先把合理性做对）。</div></div>
+          </div>
+          <h3>组货安全图谱（运营可读版）</h3>
+          <p class="muted">规则核心：把主品类目归一到安全类，然后要求副品（名称+类目文本）命中对应允许 token。命中不代表疗效保证，只代表“搭配合理性更高”。</p>
+          <div class="rule-grid">
+            <div class="rule-card">
+              <div class="k">高血压药 → 允许副品信号</div>
+              <div class="v">
+                <span class="chip rule">血压计</span> <span class="chip rule">辅酶Q10</span> <span class="chip rule">营养保健</span>
+              </div>
+            </div>
+            <div class="rule-card">
+              <div class="k">降糖药 → 允许副品信号</div>
+              <div class="v">
+                <span class="chip rule">血糖仪</span> <span class="chip rule">神经</span> <span class="chip rule">营养保健</span>
+              </div>
+            </div>
+            <div class="rule-card">
+              <div class="k">降脂药 → 允许副品信号</div>
+              <div class="v">
+                <span class="chip rule">辅酶Q10</span> <span class="chip rule">营养保健</span>
+              </div>
+            </div>
+            <div class="rule-card">
+              <div class="k">抗生素 → 允许副品信号</div>
+              <div class="v">
+                <span class="chip rule">益生菌</span> <span class="chip rule">肠胃</span> <span class="chip rule">营养保健</span>
+              </div>
+            </div>
+          </div>
+          <h3>主品类目归一（_category_canon）</h3>
+          <table class="tbl">
+            <thead><tr><th>命中条件（主品类目包含关键词）</th><th>归一到的安全类</th></tr></thead>
+            <tbody>
+              <tr><td>心脑血管 / 高血压 / 降压 / 冠心病 / 中风 / 脑卒中 / 眩晕</td><td>高血压药</td></tr>
+              <tr><td>降糖 / 糖尿病 / 内分泌 / 胰岛素 / 格列 / 二甲双胍</td><td>降糖药</td></tr>
+              <tr><td>降脂 / 他汀 / 血脂</td><td>降脂药</td></tr>
+              <tr><td>抗生素 / 抗菌 / 抗感染 / 头孢 / 青霉素 / 阿莫西林 / 沙星</td><td>抗生素</td></tr>
+            </tbody>
+          </table>
+          <h3>创口耗材门槛（纱布/碘伏等）</h3>
+          <p class="muted">如果副品包含：<b>纱布/棉签/绷带/脱脂棉/创可贴/碘伏/医用胶带</b>，则需要主品上下文出现以下任一关键词：<b>外伤/创口/创面/术后/烧伤/烫伤/褥疮/换药/清创/手术/缝合/消毒</b>。</p>
+          <div class="rule-grid">
+            <div class="rule-card"><div class="k">命中创面语境</div><div class="v">consumable_factor = <b>1.0</b></div></div>
+            <div class="rule-card"><div class="k">缺少创面语境</div><div class="v">consumable_factor = <b>0.22</b>（强降权，仍可能被保留但会更难入选）</div></div>
+          </div>
+          <p class="muted">备注：若主品类目归一失败（未匹配到上述 canon），代码会使用所有安全 token 的并集做兜底，会让安全门“变宽”。因此你们在后台维护类目命名时，建议尽量贴近这些关键词。</p>
+          <h3>评分权重示意</h3>
+          <p>医学/合理性（0.88）</p><div class="bar"><span style="width:88%"></span></div>
+          <p>毛利贡献（0.07）</p><div class="bar gray"><span style="width:7%"></span></div>
+          <p>可负担性（0.05）</p><div class="bar gray"><span style="width:5%"></span></div>
+          <h3>批量多样性（防塌缩）</h3>
+          <p>同一批次里某个副品被选中过多次，会被轻微扣分，避免“全都变成同一个SKU”。</p>
+          <h3>C 端卖点（四风格模板）</h3>
+          <p>系统不再走“字段直拼”，而是先判定主副品轴，再落到 4 类导购风格：<b>标本兼顾型 / 内外兼修型 / 专业守护型 / 超值凑单型</b>。</p>
+          <p class="muted">主品轴规则已扩展到大盘科室（心脑血管/呼吸道/消化/神经/风湿骨科/妇科/肝病/肿瘤/五官科/维生素钙剂/滋补调养等），覆盖更广的真实出库商品。</p>
+          <p class="muted">规则已配置化：<code>app/config/copy_rule_config.json</code>（可持续扩）；可通过脚本 <code>scripts/build_copy_rule_config.py</code> 从大出库表自动刷新关键词。</p>
+          <div class="rule-grid">
+            <div class="rule-card"><div class="k">① 标本兼顾型</div><div class="v">适用：急性缓解 + 日常调理。模板：先处理当下，再做后续调理。</div></div>
+            <div class="rule-card"><div class="k">② 内外兼修型</div><div class="v">适用：外用修护 + 内服营养。模板：外面管表层，里面补源头。</div></div>
+            <div class="rule-card"><div class="k">③ 专业守护型</div><div class="v">适用：特定人群/慢病场景。模板：当前场景解决 + 长期续航支持。</div></div>
+            <div class="rule-card"><div class="k">④ 超值凑单型</div><div class="v">适用：家庭常备/轻量加购。模板：一单带走，省心不拆单。</div></div>
+          </div>
+          <p class="muted">系统会自动生成“场景化标题”（如头痛急救包、明眸内外组合、男士活力套装），并过滤“说明用于/对症需求”等说明书化表述。</p>
+          <h3>你可以如何调参</h3>
+          <table class="tbl">
+            <thead><tr><th>项</th><th>作用</th><th>运营理解</th></tr></thead>
+            <tbody>
+              <tr><td>安全 token</td><td>决定“能否搭”</td><td>越宽越容易出现不合理搭配；越窄越可能无候选</td></tr>
+              <tr><td>创口耗材降权</td><td>抑制耗材乱入</td><td>无外科语境就不推荐纱布棉签</td></tr>
+              <tr><td>多样性惩罚</td><td>避免塌缩</td><td>同一副品不要霸榜整批</td></tr>
+              <tr><td>文案风格映射</td><td>决定“怎么说”</td><td>按主副品轴自动落到 4 套导购模板，避免字段拼接感</td></tr>
+            </tbody>
+          </table>
+        `;
+      } else if(view==='pricing'){
+        titleEl.textContent = '定价助手｜规则说明（运营版）';
+        bodyEl.innerHTML = `
+          <p class="muted">目的：把“销量相对同品平均（X轴）”和“利润相对同品平均（Y轴）”做成四象限，自动给出方向（提价/降价）与幅度（受 ±10% 上限+5%软保护线约束）。</p>
+          <div class="rule-grid">
+            <div class="rule-card"><div class="k">① 导入批次（独立）</div><div class="v">定价批次独立于智能组货：上传订单/出库报表后生成建议。</div></div>
+            <div class="rule-card"><div class="k">② 规则主键（品种精确）</div><div class="v">产品名称 + 厂家 + 商品编码 + 标品主码（用于同品对比与归并）。</div></div>
+            <div class="rule-card"><div class="k">③ 调价幅度上限</div><div class="v">单次调价最大幅度默认 10%（可改）。幅度绝对值&lt;1% 视为“持平”。</div></div>
+            <div class="rule-card"><div class="k">④ 软保护线</div><div class="v">自营毛利率低于 5% 时仍允许小幅降价（返利场景），但系统会自动收敛降价幅度。</div></div>
+          </div>
+
+          <h3>四象限决策图（相对同品平均）</h3>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:stretch;">
+            <div class="rule-card">
+              <div class="k">Q1：销量好 + 利润好</div>
+              <div class="v">小幅提价（偏利润），避免过度影响销量。</div>
+              <div class="bar gray" style="margin-top:10px;"><span style="width:55%"></span></div>
+            </div>
+            <div class="rule-card">
+              <div class="k">Q2：销量好 + 利润差</div>
+              <div class="v">提价修利润（用“利润落后”触发提价）。</div>
+              <div class="bar" style="margin-top:10px;"><span style="width:75%"></span></div>
+            </div>
+            <div class="rule-card">
+              <div class="k">Q3：销量差 + 利润好</div>
+              <div class="v">降价拉销量（用“销量落后”触发降价）。</div>
+              <div class="bar" style="margin-top:10px;"><span style="width:75%"></span></div>
+            </div>
+            <div class="rule-card">
+              <div class="k">Q4：销量差 + 利润差</div>
+              <div class="v">优先小幅降价拉销量，同时受 5%软保护线约束利润下行。</div>
+              <div class="bar gray" style="margin-top:10px;"><span style="width:50%"></span></div>
+            </div>
+          </div>
+
+          <h3>权重在象限里怎么用</h3>
+          <p>销量权重 0.6、利润权重 0.4：决定“幅度大小”的倾向；象限决定“方向”。</p>
+
+          <h3>MP vs 自营：利润指标口径</h3>
+          <table class="tbl">
+            <thead><tr><th>模式</th><th>利润指标（用于Y轴）</th><th>备注</th></tr></thead>
+            <tbody>
+              <tr><td>MP</td><td>REV/GMV（佣金率）</td><td>MP 下 REV≈毛利额，毛利率≈100%，因此用佣金率做区分。</td></tr>
+              <tr><td>自营</td><td>GAAP毛利额/REV（毛利率）</td><td>更贴近真实经营毛利。</td></tr>
+            </tbody>
+          </table>
+
+          <h3>执行闭环</h3>
+          <p>生成建议 → 运营逐条“确认” → 同步已确认建议（写入规则表）→ 导出 CSV 下发执行。</p>
+        `;
+      } else if(view==='inventory'){
+        titleEl.textContent = '库存清单｜说明';
+        bodyEl.innerHTML = `
+          <p class="muted">库存清单是商品库入口，可被智能组货与定价助手交叉使用（作为 SKU 字典与候选池）。</p>
+          <p>库存清单本身不产生建议；它提供“有哪些 SKU / 类目 / 成本 / 原价”。</p>
+        `;
+      } else {
+        titleEl.textContent = '预算与消耗｜说明';
+        bodyEl.innerHTML = `
+          <p class="muted">这里管理百炼模型、预算与 Token 消耗。AI 未启用时系统会自动回退规则引擎，不影响主流程。</p>
+        `;
+      }
+      document.getElementById('explainMask').classList.add('show');
+    }
+    function handleRefresh(){
+      if(window.__activeView==='inventory') loadInventoryStats();
+      else if(window.__activeView==='budget') loadBudget();
+      else if(window.__activeView==='bundle') { opsRefresh(); loadMetrics(); }
+      else if(window.__activeView==='pricing') { pricingRefresh(); }
+    }
     function statusClass(status){ if(status==='confirmed') return 'status confirmed'; if(status==='published') return 'status published'; return 'status'; }
     function sourceTag(x){ return (x.source||'')==='bailian_llm' ? '<span class="chip">百炼AI</span>' : '<span class="chip rule">规则引擎</span>'; }
     function escapeHtml(s){
@@ -234,12 +475,47 @@
       }
     }
     async function onOpsFileChange(){ const ok = await opsUpload(); if(ok){ document.getElementById('opsSummary').textContent = '文件已上传，点击「生成组货方案」即可（默认规则引擎，速度快）。'; } }
+    async function pricingUpload(){
+      const f=document.getElementById('pricingFile').files[0];
+      if(!f){ alert('请先选择定价Excel'); return false; }
+      document.getElementById('pricingSummary').textContent = '正在上传定价文件，请稍候...';
+      const fd=new FormData(); fd.append('file',f);
+      try {
+        const { res, data } = await postJSONWithTimeout(`${window.location.origin}/api/ops/upload-catalog`, { method:'POST', body:fd }, 60000);
+        if(!res.ok){ alert(data.detail || `上传失败（HTTP ${res.status}）`); document.getElementById('pricingSummary').textContent='上传失败，请重试。'; return false; }
+        window.__pricingBatchId = data.batch_id;
+        window.__pricingUploadedFilename = f.name;
+        persistPricingBatch();
+        document.getElementById('pricingBatch').textContent = `定价批次：${data.batch_id} ｜ 解析：${data.total_rows} 行`;
+        document.getElementById('pricingSummary').textContent = '上传完成，可点击「生成定价建议」。';
+        window.__pricingPage = 1;
+        await pricingRefresh(1);
+        return true;
+      } catch (e) {
+        const msg = (e && e.name === 'AbortError') ? '上传超时（60秒），请换小文件先验证' : `上传异常：${e.message || e}`;
+        alert(msg);
+        document.getElementById('pricingSummary').textContent = msg;
+        return false;
+      }
+    }
+    async function onPricingFileChange(){
+      const ok = await pricingUpload();
+      if(ok){ document.getElementById('pricingSummary').textContent = '文件已上传，点击「生成定价建议」即可。'; }
+    }
     function persistOpsBatch(){
       try {
         if (window.__opsBatchId) sessionStorage.setItem('ops_batch_id', window.__opsBatchId);
         else sessionStorage.removeItem('ops_batch_id');
         if (window.__uploadedFilename) sessionStorage.setItem('ops_uploaded_filename', window.__uploadedFilename);
         else sessionStorage.removeItem('ops_uploaded_filename');
+      } catch (e) { /* ignore */ }
+    }
+    function persistPricingBatch(){
+      try {
+        if (window.__pricingBatchId) sessionStorage.setItem('pricing_batch_id', window.__pricingBatchId);
+        else sessionStorage.removeItem('pricing_batch_id');
+        if (window.__pricingUploadedFilename) sessionStorage.setItem('pricing_uploaded_filename', window.__pricingUploadedFilename);
+        else sessionStorage.removeItem('pricing_uploaded_filename');
       } catch (e) { /* ignore */ }
     }
     function restoreOpsBatchFromStorage(){
@@ -251,6 +527,18 @@
           window.__uploadedFilename = fn || '';
           const el = document.getElementById('opsBatch');
           if (el) el.textContent = `批次：${bid}（已从本页缓存恢复）${fn ? ' ｜ 上次文件：' + fn : ''}`;
+        }
+      } catch (e) { /* ignore */ }
+    }
+    function restorePricingBatchFromStorage(){
+      try {
+        const bid = sessionStorage.getItem('pricing_batch_id');
+        const fn = sessionStorage.getItem('pricing_uploaded_filename');
+        if (bid) {
+          window.__pricingBatchId = bid;
+          window.__pricingUploadedFilename = fn || '';
+          const el = document.getElementById('pricingBatch');
+          if (el) el.textContent = `定价批次：${bid}（已从本页缓存恢复）${fn ? ' ｜ 上次文件：' + fn : ''}`;
         }
       } catch (e) { /* ignore */ }
     }
@@ -324,7 +612,13 @@
       list.items.forEach(x=>{
         const tr=document.createElement('tr');
         let reason='规则关联推理';
-        try{ const p=JSON.parse(x.decision_payload||'{}'); const t=(p.decision_trace||{}); if((x.decision_payload||'').includes('medical_reason')) reason='AI医学推理'; else if(Array.isArray(t.association_tags) && t.association_tags.length) reason=t.association_tags.slice(0,2).join(' / ');}catch(e){}
+        try{
+          const p=JSON.parse(x.decision_payload||'{}');
+          const t=(p.decision_trace||{});
+          if((x.decision_payload||'').includes('medical_reason')) reason='AI医学推理';
+          else if(t.copy_style_name) reason=`${t.copy_style_name} / 规则关联推理`;
+          else if(Array.isArray(t.association_tags) && t.association_tags.length) reason=t.association_tags.slice(0,2).join(' / ');
+        }catch(e){}
         const selling = (x.sales_copy && String(x.sales_copy).trim()) ? escapeHtml(x.sales_copy.trim()) : '—';
         const pkg = escapeHtml((x.package_name && String(x.package_name).trim()) ? x.package_name : '—');
         tr.innerHTML=`<td>${x.id}</td><td style="max-width:120px;font-weight:600;color:#1e293b;">${pkg}</td><td>${escapeHtml(x.main_product_name)}<br/><span style="color:#94a3b8;font-size:12px;">${escapeHtml(x.main_sku_id)}</span></td><td>${escapeHtml(x.selected_product_name)}<br/><span style="color:#94a3b8;font-size:12px;">${escapeHtml(x.selected_sku_id)}</span></td><td style="vertical-align:top;"><div class="selling-point">${selling}</div><button type="button" class="btn" style="font-size:11px;padding:4px 10px;margin-top:6px;" onclick="copySellingPointPrev(this)">复制卖点</button></td><td>${escapeHtml(reason)}</td><td>${sourceTag(x)}</td><td>¥${Number(x.addon_price).toFixed(2)}</td><td>¥${Number(x.projected_profit).toFixed(2)}</td><td><span class="${statusClass(x.status)}">${x.status}</span></td><td>${x.status==='draft'?`<button class="btn" onclick="opsConfirm(${x.id})">确认</button>`:'-'}</td>`;
@@ -338,6 +632,82 @@
     }
     function prevOpsPage(){ if(window.__opsPage > 1) opsRefresh(window.__opsPage - 1); }
     function nextOpsPage(){ const totalPage = Math.max(1, Math.ceil((window.__opsTotal || 0) / window.__opsPageSize)); if(window.__opsPage < totalPage) opsRefresh(window.__opsPage + 1); }
+    function updatePricingPager(){
+      const totalPage = Math.max(1, Math.ceil((window.__pricingTotal || 0) / window.__pricingPageSize));
+      document.getElementById('pricingPageInfo').textContent = `第 ${window.__pricingPage} / ${totalPage} 页（共 ${window.__pricingTotal} 条）`;
+      document.getElementById('pricingPrevBtn').disabled = window.__pricingPage <= 1;
+      document.getElementById('pricingNextBtn').disabled = window.__pricingPage >= totalPage;
+    }
+    async function pricingRefresh(page = window.__pricingPage){
+      if(!window.__pricingBatchId){
+        const tbody=document.getElementById('pricingTable');
+        if (tbody) tbody.innerHTML = `<tr><td colspan="14" style="text-align:center;color:#64748b;padding:14px;">请先上传待定价商品并生成批次。</td></tr>`;
+        return;
+      }
+      window.__pricingPage = page;
+      const offset = (window.__pricingPage - 1) * window.__pricingPageSize;
+      const res = await fetch(`/api/ops/pricing/list?batch_id=${encodeURIComponent(window.__pricingBatchId)}&limit=${window.__pricingPageSize}&offset=${offset}`);
+      const d = await res.json();
+      if(!res.ok){ document.getElementById('pricingSummary').textContent = d.detail || '加载定价建议失败'; return; }
+      window.__pricingTotal = Number(d.total || 0);
+      const tbody=document.getElementById('pricingTable'); tbody.innerHTML='';
+      if(!d.items || !d.items.length){
+        tbody.innerHTML = `<tr><td colspan="14" style="text-align:center;color:#64748b;padding:14px;">暂无定价建议。请点击「生成定价建议」。</td></tr>`;
+        updatePricingPager();
+        return;
+      }
+      d.items.forEach(x=>{
+        const tr=document.createElement('tr');
+        const sign = Number(x.delta_ratio||0) > 0 ? '+' : '';
+        const curM = (x.current_margin==null) ? '-' : `${(Number(x.current_margin)*100).toFixed(1)}%`;
+        const predM = (x.predicted_margin==null) ? '-' : `${(Number(x.predicted_margin)*100).toFixed(1)}%`;
+        tr.innerHTML = `<td>${x.id}</td><td>${escapeHtml(x.product_name||'')}</td><td>${escapeHtml(x.manufacturer||'-')}</td><td>${escapeHtml(x.product_code||'-')}</td><td>${escapeHtml(x.standard_code||'-')}</td><td>${escapeHtml(x.business_mode||'-')}</td><td>¥${Number(x.current_price||0).toFixed(2)}</td><td>¥${Number(x.suggested_price||0).toFixed(2)}</td><td>${sign}${(Number(x.delta_ratio||0)*100).toFixed(1)}%</td><td>${curM}</td><td>${predM}</td><td>${escapeHtml(x.reason||'')}</td><td><span class="${statusClass(x.status)}">${x.status}</span></td><td>${x.status==='draft'?`<button class="btn" onclick="pricingConfirm(${x.id})">确认</button>`:'-'}</td>`;
+        tbody.appendChild(tr);
+      });
+      updatePricingPager();
+    }
+    async function pricingGenerate(){
+      if(!window.__pricingBatchId){
+        const uploaded = await pricingUpload();
+        if(!uploaded) return;
+      }
+      const btn = document.getElementById('pricingGenerateBtn');
+      const old = btn ? btn.textContent : '';
+      if(btn){ btn.disabled = true; btn.textContent = '生成中...'; }
+      const maxAdj = Number(document.getElementById('pricingMaxAdj').value || 10) / 100;
+      const floor = Number(document.getElementById('pricingSoftFloor').value || 5) / 100;
+      try{
+        const res = await fetch(`/api/ops/pricing/generate?batch_id=${encodeURIComponent(window.__pricingBatchId)}&max_adjust_ratio=${maxAdj}&sales_weight=0.6&profit_weight=0.4&soft_margin_floor=${floor}`, { method:'POST' });
+        const d = await res.json();
+        if(!res.ok){ alert(d.detail || '生成失败'); return; }
+        document.getElementById('pricingSummary').textContent = `已生成 ${d.generated_count} 条定价建议（提价 ${d.actions.up} / 降价 ${d.actions.down} / 持平 ${d.actions.keep}）`;
+        window.__pricingPage = 1;
+        await pricingRefresh(1);
+      } finally {
+        if(btn){ btn.disabled = false; btn.textContent = old || '生成定价建议'; }
+      }
+    }
+    function prevPricingPage(){ if(window.__pricingPage > 1) pricingRefresh(window.__pricingPage - 1); }
+    function nextPricingPage(){ const totalPage = Math.max(1, Math.ceil((window.__pricingTotal || 0) / window.__pricingPageSize)); if(window.__pricingPage < totalPage) pricingRefresh(window.__pricingPage + 1); }
+    async function pricingConfirm(id){
+      const res = await fetch(`/api/ops/pricing/${id}/confirm`, { method:'POST' });
+      const d = await res.json();
+      if(!res.ok){ alert(d.detail || '确认失败'); return; }
+      await pricingRefresh();
+      await opsRefresh();
+    }
+    async function pricingSync(){
+      if(!window.__pricingBatchId){ alert('请先上传并生成定价建议'); return; }
+      const res = await fetch(`/api/ops/pricing/sync?batch_id=${encodeURIComponent(window.__pricingBatchId)}`, { method:'POST' });
+      const d = await res.json();
+      if(!res.ok){ alert(d.detail || '同步失败'); return; }
+      alert(`定价建议同步完成：${d.synced_count} 条`);
+      await pricingRefresh();
+    }
+    function pricingExportCsv(){
+      if(!window.__pricingBatchId){ alert('请先上传待定价并生成批次'); return; }
+      window.location.href = `${window.location.origin}/api/ops/pricing/export?batch_id=${encodeURIComponent(window.__pricingBatchId)}`;
+    }
     async function opsConfirm(id){ const res=await fetch(`/api/ops/strategies/${id}/confirm`,{method:'POST'}); const d=await res.json(); if(!res.ok){alert(d.detail||'确认失败');return;} await opsRefresh(); }
     async function opsSync(){ if(!window.__opsBatchId){alert('请先上传并生成策略');return;} const res=await fetch(`/api/ops/sync?batch_id=${encodeURIComponent(window.__opsBatchId)}`,{method:'POST'}); const d=await res.json(); if(!res.ok){alert(d.detail||'同步失败');return;} alert(`同步完成：${d.synced_count} 条`); await opsRefresh(); await loadMetrics(); }
     async function loadMetrics(){ const res=await fetch('/api/admin/metrics'); const m=await res.json(); const k=[['请求量',m.total_requests],['AI调用量',m.ai_total_calls],['AI成功率',`${(m.ai_success_rate*100).toFixed(1)}%`],['AI回退率',`${(m.ai_fallback_rate*100).toFixed(1)}%`],['累计Token',m.ai_total_tokens||0],['累计成本(USD)',Number(m.ai_estimated_cost_usd||0).toFixed(6)],['平均参考毛利',`¥${Number(m.avg_projected_profit).toFixed(2)}`],['加购毛利',`¥${Number(m.addon_margin).toFixed(2)}`]]; document.getElementById('metrics').innerHTML=k.map(([a,b])=>`<div class="kpi"><div class="k">${a}</div><div class="v">${b}</div></div>`).join(''); }
@@ -345,8 +715,9 @@
     async function loadBudget(){ const res=await fetch('/api/admin/budget'); const b=await res.json(); document.getElementById('budgetModel').value=b.model||'qwen-plus'; document.getElementById('budgetMonthly').value=b.monthly_budget_usd||50; document.getElementById('budgetInCost').value=b.input_cost_per_1k||0.0012; document.getElementById('budgetOutCost').value=b.output_cost_per_1k||0.0024; document.getElementById('budgetEnabled').checked=!!b.enabled; document.getElementById('budgetBaseUrl').value=b.base_url||'https://dashscope.aliyuncs.com/compatible-mode/v1'; document.getElementById('budgetTimeout').value=b.timeout_sec||1.2; document.getElementById('budgetApiKey').placeholder=b.api_key_configured?'已配置（留空表示不修改）':'sk-xxx（保存后即时生效）'; const cards=[['当前模型',b.model],['AI密钥状态',b.api_key_configured?'已配置':'未配置'],['累计Token消耗',b.total_tokens],['预计支出(USD)',Number(b.estimated_cost_usd||0).toFixed(6)],['月预算使用率',`${(Number(b.budget_used_rate||0)*100).toFixed(1)}%`]]; document.getElementById('budgetCards').innerHTML=cards.map(([k,v])=>`<div class="kpi"><div class="k">${k}</div><div class="v">${v}</div></div>`).join(''); }
     async function saveBudgetSetting(){ const key=document.getElementById('budgetApiKey').value; const body={model:document.getElementById('budgetModel').value,api_key:key?key:undefined,base_url:document.getElementById('budgetBaseUrl').value,timeout_sec:Number(document.getElementById('budgetTimeout').value||1.2),enabled:document.getElementById('budgetEnabled').checked,monthly_budget_usd:Number(document.getElementById('budgetMonthly').value||50),input_cost_per_1k:Number(document.getElementById('budgetInCost').value||0.0012),output_cost_per_1k:Number(document.getElementById('budgetOutCost').value||0.0024)}; const res=await fetch('/api/admin/budget/model',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); const d=await res.json(); if(!res.ok){alert(d.detail||'保存失败');return;} document.getElementById('budgetApiKey').value=''; alert('模型与预算配置已保存并已即时生效'); await loadBudget(); await loadAiNotice(); }
     restoreOpsBatchFromStorage();
+    restorePricingBatchFromStorage();
     loadMetrics(); loadInventoryStats(); loadInventoryList(); loadBudget(); loadAiNotice();
-    if (window.__opsBatchId) { opsRefresh(1); }
+    if (window.__opsBatchId) { opsRefresh(1); pricingRefresh(1); }
   </script>
 </body>
 </html>

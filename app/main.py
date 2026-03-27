@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-import csv
 import io
 import json
 import os
 import random
 import sqlite3
-import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -20,11 +18,11 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 from starlette.requests import Request
 
-from app.ai_brain import BailianAIBrain
+from app.ai_brain import BailianAIBrain, _env_bool
 from app.bundle_engine import BundleEngine, EngineCandidate, EngineInput, EnginePolicy, EngineStrategy
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-DB_PATH = Path(os.getenv("APP_DB_PATH", str(BASE_DIR / "app.db")))
+DB_PATH = BASE_DIR / "app.db"
 
 app = FastAPI(title="1药网 AI 组货中间件 MVP", version="0.1.0")
 templates = Jinja2Templates(directory=str(BASE_DIR / "app" / "templates"))
@@ -55,111 +53,15 @@ class RecommendRequest(BaseModel):
     user_id: str | None = None
 
 
-def _resolve_item_code(cur: sqlite3.Cursor, sku_id: str) -> str:
-    """对外展示「商品编码」列：优先库存表 item_code，其次主码(product_code)，否则 sku_id。"""
-    if not sku_id:
-        return ""
-    row = cur.execute(
-        """
-        SELECT COALESCE(NULLIF(TRIM(item_code), ''), NULLIF(TRIM(product_code), ''), sku_id)
-        FROM products WHERE sku_id=?
-        """,
-        (sku_id,),
-    ).fetchone()
-    if row and row[0]:
-        return str(row[0])
-    return str(sku_id)
-
-
-def _enrich_bundle_row(cur: sqlite3.Cursor, d: dict[str, Any]) -> None:
-    if not d.get("main_item_code"):
-        d["main_item_code"] = _resolve_item_code(cur, str(d.get("main_sku_id") or ""))
-    if not d.get("selected_item_code"):
-        d["selected_item_code"] = _resolve_item_code(cur, str(d.get("selected_sku_id") or ""))
-    if d.get("sales_copy"):
-        d["sales_copy"] = BundleEngine.strip_legacy_bundle_sales_tail(str(d["sales_copy"]))
-    pn = (d.get("package_name") or "").strip()
-    if not pn:
-        try:
-            pay = json.loads(d.get("decision_payload") or "{}")
-            pn = (pay.get("package_name") or "").strip()
-        except Exception:
-            pn = ""
-        if not pn:
-            pn = BundleEngine().build_package_name(
-                str(d.get("main_product_name") or ""),
-                d.get("main_category"),
-                str(d.get("selected_product_name") or ""),
-                None,
-                str(d.get("medical_logic") or ""),
-            )
-        d["package_name"] = pn
-
-
 def db_conn() -> sqlite3.Connection:
-    # SQLite 在并发写场景下容易短暂锁表，这里增加等待时间并启用 busy_timeout。
-    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout = 30000")
     return conn
-
-
-def _execute_with_retry(
-    cur: sqlite3.Cursor,
-    sql: str,
-    params: tuple[Any, ...] | list[Any] = (),
-    retries: int = 8,
-    sleep_sec: float = 0.25,
-) -> None:
-    for i in range(retries):
-        try:
-            cur.execute(sql, tuple(params))
-            return
-        except sqlite3.OperationalError as exc:
-            if "locked" not in str(exc).lower() or i == retries - 1:
-                raise
-            time.sleep(sleep_sec * (i + 1))
-
-
-def _executemany_with_retry(
-    cur: sqlite3.Cursor,
-    sql: str,
-    rows: list[tuple[Any, ...]],
-    retries: int = 6,
-    sleep_sec: float = 0.35,
-) -> None:
-    for i in range(retries):
-        try:
-            cur.executemany(sql, rows)
-            return
-        except sqlite3.OperationalError as exc:
-            if "locked" not in str(exc).lower() or i == retries - 1:
-                raise
-            time.sleep(sleep_sec * (i + 1))
 
 
 def init_db() -> None:
     conn = db_conn()
     cur = conn.cursor()
-    # WAL 模式可以显著减少读写互斥带来的锁冲突。
-    # 某些情况下（例如上次异常退出）这里会短暂锁库，做重试并降级，避免启动直接失败。
-    pragma_ok = False
-    for i in range(8):
-        try:
-            cur.execute("PRAGMA journal_mode=WAL")
-            cur.execute("PRAGMA synchronous=NORMAL")
-            pragma_ok = True
-            break
-        except sqlite3.OperationalError as exc:
-            if "locked" not in str(exc).lower():
-                raise
-            time.sleep(0.2 * (i + 1))
-    if not pragma_ok:
-        try:
-            cur.execute("PRAGMA synchronous=NORMAL")
-        except sqlite3.OperationalError:
-            # 保底：即使无法设置 pragma，也继续初始化表结构。
-            pass
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS policies (
@@ -203,13 +105,12 @@ def init_db() -> None:
         CREATE TABLE IF NOT EXISTS products (
             sku_id TEXT PRIMARY KEY,
             product_name TEXT NOT NULL,
-            product_code TEXT,
-            manufacturer TEXT,
-            department TEXT,
-            item_code TEXT,
-            level1_category TEXT,
             category TEXT NOT NULL,
             role TEXT NOT NULL,
+            product_code TEXT,
+            standard_code TEXT,
+            manufacturer TEXT,
+            department TEXT,
             cost REAL NOT NULL,
             original_price REAL NOT NULL,
             gross_margin_rate REAL NOT NULL,
@@ -275,12 +176,24 @@ def init_db() -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             batch_id TEXT NOT NULL,
             sku_id TEXT NOT NULL,
+            product_code TEXT,
+            standard_code TEXT,
             product_name TEXT NOT NULL,
+            manufacturer TEXT,
             category TEXT,
+            business_mode TEXT,
+            platform TEXT,
+            merchant_name TEXT,
             price REAL NOT NULL,
             cost REAL NOT NULL,
             qty INTEGER NOT NULL DEFAULT 1,
             gmv REAL NOT NULL DEFAULT 0,
+            revenue REAL NOT NULL DEFAULT 0,
+            gaap_profit REAL NOT NULL DEFAULT 0,
+            gaap_margin REAL NOT NULL DEFAULT 0,
+            order_cnt INTEGER NOT NULL DEFAULT 0,
+            customer_cnt INTEGER NOT NULL DEFAULT 0,
+            arpo REAL NOT NULL DEFAULT 0,
             role_hint TEXT NOT NULL,
             created_at TEXT NOT NULL
         )
@@ -300,9 +213,6 @@ def init_db() -> None:
             addon_price REAL NOT NULL,
             projected_profit REAL NOT NULL,
             sales_copy TEXT NOT NULL,
-            package_name TEXT NOT NULL DEFAULT '',
-            main_item_code TEXT NOT NULL DEFAULT '',
-            selected_item_code TEXT NOT NULL DEFAULT '',
             decision_payload TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'draft',
             created_at TEXT NOT NULL,
@@ -327,13 +237,59 @@ def init_db() -> None:
     )
     cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS pricing_recommendations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_id TEXT NOT NULL,
+            product_name TEXT NOT NULL,
+            manufacturer TEXT,
+            product_code TEXT,
+            standard_code TEXT,
+            business_mode TEXT,
+            platform TEXT,
+            merchant_name TEXT,
+            current_price REAL NOT NULL,
+            suggested_price REAL NOT NULL,
+            delta_ratio REAL NOT NULL,
+            sales_metric REAL NOT NULL,
+            profit_metric REAL NOT NULL,
+            current_margin REAL,
+            predicted_margin REAL,
+            confidence REAL NOT NULL DEFAULT 0.6,
+            reason TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'draft',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pricing_rules (
+            rule_key TEXT PRIMARY KEY,
+            product_name TEXT NOT NULL,
+            manufacturer TEXT,
+            product_code TEXT,
+            standard_code TEXT,
+            business_mode TEXT,
+            platform TEXT,
+            merchant_name TEXT,
+            current_price REAL NOT NULL,
+            suggested_price REAL NOT NULL,
+            delta_ratio REAL NOT NULL,
+            current_margin REAL,
+            predicted_margin REAL,
+            reason TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS llm_settings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             provider TEXT NOT NULL,
             model TEXT NOT NULL,
-            api_key TEXT,
-            base_url TEXT,
-            timeout_sec REAL NOT NULL DEFAULT 1.2,
             enabled INTEGER NOT NULL DEFAULT 1,
             monthly_budget_usd REAL NOT NULL DEFAULT 50,
             input_cost_per_1k REAL NOT NULL DEFAULT 0.001,
@@ -363,35 +319,53 @@ def init_db() -> None:
     if "gmv" not in cols:
         cur.execute("ALTER TABLE uploaded_products ADD COLUMN gmv REAL NOT NULL DEFAULT 0")
         conn.commit()
-    product_cols = [r["name"] for r in cur.execute("PRAGMA table_info(products)").fetchall()]
-    for name, ddl in [
-        ("product_code", "ALTER TABLE products ADD COLUMN product_code TEXT"),
-        ("manufacturer", "ALTER TABLE products ADD COLUMN manufacturer TEXT"),
-        ("department", "ALTER TABLE products ADD COLUMN department TEXT"),
-        ("item_code", "ALTER TABLE products ADD COLUMN item_code TEXT"),
-        ("level1_category", "ALTER TABLE products ADD COLUMN level1_category TEXT"),
-    ]:
-        if name not in product_cols:
-            cur.execute(ddl)
-            conn.commit()
-    br_cols = [r["name"] for r in cur.execute("PRAGMA table_info(bundle_recommendations)").fetchall()]
-    for name, ddl in [
-        ("package_name", "ALTER TABLE bundle_recommendations ADD COLUMN package_name TEXT NOT NULL DEFAULT ''"),
-        ("main_item_code", "ALTER TABLE bundle_recommendations ADD COLUMN main_item_code TEXT NOT NULL DEFAULT ''"),
-        ("selected_item_code", "ALTER TABLE bundle_recommendations ADD COLUMN selected_item_code TEXT NOT NULL DEFAULT ''"),
-    ]:
-        if name not in br_cols:
-            cur.execute(ddl)
-            conn.commit()
-    llm_cols = [r["name"] for r in cur.execute("PRAGMA table_info(llm_settings)").fetchall()]
-    for name, ddl in [
-        ("api_key", "ALTER TABLE llm_settings ADD COLUMN api_key TEXT"),
-        ("base_url", "ALTER TABLE llm_settings ADD COLUMN base_url TEXT"),
-        ("timeout_sec", "ALTER TABLE llm_settings ADD COLUMN timeout_sec REAL NOT NULL DEFAULT 1.2"),
-    ]:
-        if name not in llm_cols:
-            cur.execute(ddl)
-            conn.commit()
+    if "product_code" not in cols:
+        cur.execute("ALTER TABLE uploaded_products ADD COLUMN product_code TEXT")
+    if "standard_code" not in cols:
+        cur.execute("ALTER TABLE uploaded_products ADD COLUMN standard_code TEXT")
+    if "manufacturer" not in cols:
+        cur.execute("ALTER TABLE uploaded_products ADD COLUMN manufacturer TEXT")
+    if "business_mode" not in cols:
+        cur.execute("ALTER TABLE uploaded_products ADD COLUMN business_mode TEXT")
+    if "platform" not in cols:
+        cur.execute("ALTER TABLE uploaded_products ADD COLUMN platform TEXT")
+    if "merchant_name" not in cols:
+        cur.execute("ALTER TABLE uploaded_products ADD COLUMN merchant_name TEXT")
+    if "revenue" not in cols:
+        cur.execute("ALTER TABLE uploaded_products ADD COLUMN revenue REAL NOT NULL DEFAULT 0")
+    if "gaap_profit" not in cols:
+        cur.execute("ALTER TABLE uploaded_products ADD COLUMN gaap_profit REAL NOT NULL DEFAULT 0")
+    if "gaap_margin" not in cols:
+        cur.execute("ALTER TABLE uploaded_products ADD COLUMN gaap_margin REAL NOT NULL DEFAULT 0")
+    if "order_cnt" not in cols:
+        cur.execute("ALTER TABLE uploaded_products ADD COLUMN order_cnt INTEGER NOT NULL DEFAULT 0")
+    if "customer_cnt" not in cols:
+        cur.execute("ALTER TABLE uploaded_products ADD COLUMN customer_cnt INTEGER NOT NULL DEFAULT 0")
+    if "arpo" not in cols:
+        cur.execute("ALTER TABLE uploaded_products ADD COLUMN arpo REAL NOT NULL DEFAULT 0")
+    conn.commit()
+
+    # Ensure products table has pricing/vender identifiers (for inventory upload + downstream matching).
+    cols_p = [r["name"] for r in cur.execute("PRAGMA table_info(products)").fetchall()]
+    if "product_code" not in cols_p:
+        cur.execute("ALTER TABLE products ADD COLUMN product_code TEXT")
+    if "standard_code" not in cols_p:
+        cur.execute("ALTER TABLE products ADD COLUMN standard_code TEXT")
+    if "manufacturer" not in cols_p:
+        cur.execute("ALTER TABLE products ADD COLUMN manufacturer TEXT")
+    if "department" not in cols_p:
+        cur.execute("ALTER TABLE products ADD COLUMN department TEXT")
+    conn.commit()
+
+    cols_llm = [r["name"] for r in cur.execute("PRAGMA table_info(llm_settings)").fetchall()]
+    if "api_key" not in cols_llm:
+        cur.execute("ALTER TABLE llm_settings ADD COLUMN api_key TEXT")
+    if "base_url" not in cols_llm:
+        cur.execute("ALTER TABLE llm_settings ADD COLUMN base_url TEXT")
+    if "timeout_sec" not in cols_llm:
+        cur.execute("ALTER TABLE llm_settings ADD COLUMN timeout_sec REAL")
+    conn.commit()
+
     cur.execute("SELECT COUNT(*) AS cnt FROM policies")
     count = cur.fetchone()["cnt"]
     if count == 0:
@@ -481,7 +455,7 @@ def init_db() -> None:
 @app.on_event("startup")
 def startup_event() -> None:
     init_db()
-    _refresh_ai_brain_from_setting()
+    refresh_ai_brain_from_db()
 
 
 def now_iso() -> str:
@@ -550,6 +524,10 @@ def to_float(v: Any, default: float = 0) -> float:
         return default
 
 
+def clamp(v: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, v))
+
+
 def _get_llm_setting() -> dict[str, Any]:
     conn = db_conn()
     cur = conn.cursor()
@@ -558,16 +536,8 @@ def _get_llm_setting() -> dict[str, Any]:
     return dict(row) if row else {}
 
 
-def _refresh_ai_brain_from_setting() -> dict[str, Any]:
-    setting = _get_llm_setting()
-    ai_brain.configure(
-        enabled=bool(setting.get("enabled", 1)),
-        api_key=str(setting.get("api_key") or os.getenv("BAILIAN_API_KEY", "")),
-        model=str(setting.get("model") or ai_brain.model),
-        base_url=str(setting.get("base_url") or os.getenv("BAILIAN_BASE_URL", ai_brain.base_url)),
-        timeout=float(setting.get("timeout_sec") or os.getenv("BAILIAN_TIMEOUT_SEC", ai_brain.timeout)),
-    )
-    return setting
+def refresh_ai_brain_from_db() -> None:
+    ai_brain.refresh_runtime(_get_llm_setting())
 
 
 def _log_ai_usage(
@@ -620,8 +590,18 @@ def _log_ai_attempt(source: str, model: str) -> None:
 
 
 def _is_ai_allowed() -> bool:
-    _refresh_ai_brain_from_setting()
-    return ai_brain.is_enabled()
+    setting = _get_llm_setting()
+    if not bool(setting.get("enabled", 1)):
+        return False
+    key = (str(setting.get("api_key") or "").strip()) or os.getenv("BAILIAN_API_KEY", "").strip()
+    if not key:
+        return False
+    enable_env = os.getenv("ENABLE_AI_BRAIN", None)
+    if enable_env is not None and not _env_bool("ENABLE_AI_BRAIN", False):
+        return False
+    if not ai_brain.client:
+        ai_brain.refresh_runtime(setting)
+    return ai_brain.is_enabled() and bool(ai_brain.client)
 
 
 def _build_recommendation_result(
@@ -633,6 +613,8 @@ def _build_recommendation_result(
     variant: str,
     prefer_ai: bool = True,
     force_ai_only: bool = False,
+    selection_counts: dict[str, int] | None = None,
+    diversity_alpha: float = 0.003,
 ) -> dict[str, Any]:
     engine = BundleEngine()
     engine_input = EngineInput(
@@ -663,12 +645,6 @@ def _build_recommendation_result(
             category=c.category,
         )
         for c in candidates
-        if not engine.is_addon_inappropriate_for_main(
-            main_item.product_name,
-            main_item.category,
-            c.product_name,
-            c.category,
-        )
     ]
     if prefer_ai and _is_ai_allowed():
         _log_ai_attempt("ai_attempt", ai_brain.model)
@@ -709,36 +685,43 @@ def _build_recommendation_result(
             usage = ai_result.get("usage", {})
             model_used = str(ai_result.get("model", ai_brain.model))
             _log_ai_usage("bundle", model_used, usage, "bailian_llm")
+
+            # 批次生成启用多样性时：即使 LLM 给出了 selected_sku_id，
+            # 也可能因为评分基准/候选分布导致“全都选同一个SKU”。
+            # 为了保证你在后台看到的搭配不塌缩，这里直接走多样性规则选择。
+            if selection_counts is not None:
+                return engine.recommend(
+                    engine_input=engine_input,
+                    policy=engine_policy,
+                    strategy=engine_strategy,
+                    candidates=engine_candidates,
+                    selection_counts=selection_counts,
+                    diversity_alpha=diversity_alpha,
+                )
+
             candidate_map = {c.sku_id: c for c in engine_candidates}
             selected = candidate_map.get(str(llm_data.get("selected_sku_id", "")).strip())
             if selected:
-                # 组货只管选品；价格一律用副品原价，后续业务侧再谈促销/换购价。
-                addon_price = round(float(selected.original_price or 0), 2)
-                projected_profit = round(addon_price - float(selected.cost or 0), 2)
+                anchor_ratio = strategy.get("pricing_rules", {}).get("anchor_ratio", 0.42)
+                min_margin_rate = strategy.get("pricing_rules", {}).get("min_margin_rate", 0.35)
+                margin_rate = max(float(policy_like["margin_rate"]), float(min_margin_rate))
+                ar = anchor_ratio if variant == "A" else max(0.3, anchor_ratio - 0.03)
+                addon_price = round(max(selected.cost * (1 + margin_rate), selected.original_price * ar), 2)
+                projected_profit = round(addon_price - selected.cost, 2)
+                forbidden_terms = strategy.get("forbidden_terms", [])
                 sales_copy = str(llm_data.get("sales_copy") or "").strip()
                 if not sales_copy:
-                    sales_copy = BundleEngine().build_consumer_sales_copy(
+                    sales_copy = engine.combo_sales_copy(
                         main_item.product_name,
                         main_item.category,
-                        selected.product_name,
-                        selected.category,
-                        policy_like["logic_type"],
+                        selected,
+                        engine_policy,
                         variant,
-                        list(strategy.get("forbidden_terms") or []),
+                        forbidden_terms,
+                        main_sku_id=main_item.sku_id,
                     )
-                forbidden_terms = strategy.get("forbidden_terms", [])
                 for bad in forbidden_terms:
                     sales_copy = sales_copy.replace(str(bad), "")
-                sales_copy = BundleEngine.strip_legacy_bundle_sales_tail(sales_copy)
-                pkg = str(llm_data.get("package_name") or "").strip()
-                if not pkg:
-                    pkg = BundleEngine().build_package_name(
-                        main_item.product_name,
-                        main_item.category,
-                        selected.product_name,
-                        selected.category,
-                        policy_like["logic_type"],
-                    )
                 return {
                     "recommendation": {
                         "request_id": f"req_{int(datetime.now().timestamp() * 1000)}_{random.randint(100, 999)}",
@@ -746,17 +729,15 @@ def _build_recommendation_result(
                         "selected_sku_id": selected.sku_id,
                         "product_name": selected.product_name,
                         "medical_logic": str(llm_data.get("medical_logic") or policy_like["logic_type"]),
-                        "package_name": pkg,
                         "sales_copy": sales_copy,
                         "pricing_strategy": {
                             "addon_price": addon_price,
                             "original_price": selected.original_price,
-                            "display_tag": f"按商品原价 ¥{addon_price:.2f}",
+                            "display_tag": f"加{addon_price:.0f}元换购价",
                         },
                         "projected_profit": projected_profit,
                         "decision_trace": {
                             "source": "bailian_llm",
-                            "price_mode": "original_price",
                             "confidence": float(llm_data.get("confidence", 0.5) or 0.5),
                             "medical_reason": str(llm_data.get("medical_reason", "")),
                             "model": model_used,
@@ -772,6 +753,8 @@ def _build_recommendation_result(
         policy=engine_policy,
         strategy=engine_strategy,
         candidates=engine_candidates,
+        selection_counts=selection_counts,
+        diversity_alpha=diversity_alpha,
     )
 
 
@@ -845,14 +828,42 @@ def health() -> dict[str, str]:
 
 @app.get("/api/admin/ai-status")
 def ai_status() -> dict[str, Any]:
-    setting = _refresh_ai_brain_from_setting()
+    setting = _get_llm_setting()
     return {
-        "enabled": ai_brain.is_enabled(),
+        "enabled": _is_ai_allowed(),
         "model": setting.get("model", ai_brain.model),
         "base_url": ai_brain.base_url,
         "timeout_sec": ai_brain.timeout,
-        "api_key_configured": bool(ai_brain.api_key),
     }
+
+
+@app.get("/api/admin/db-info")
+def db_info() -> dict[str, Any]:
+    # Debug helper: confirm which app.db instance the running server is using.
+    info: dict[str, Any] = {
+        "db_path": str(DB_PATH),
+        "db_exists": DB_PATH.exists(),
+    }
+    try:
+        if DB_PATH.exists():
+            st = DB_PATH.stat()
+            info["db_mtime"] = st.st_mtime
+    except Exception:
+        pass
+    try:
+        conn = db_conn()
+        cur = conn.cursor()
+        row = cur.execute(
+            "SELECT batch_id, MAX(updated_at) AS max_updated FROM bundle_recommendations GROUP BY batch_id ORDER BY max_updated DESC LIMIT 1"
+        ).fetchone()
+        info["latest_bundle_by_updated_at"] = {"batch_id": row[0], "max_updated": row[1]} if row else None
+        info["bundle_recommendations_total"] = cur.execute("SELECT COUNT(*) FROM bundle_recommendations").fetchone()[0]
+        info["upload_batches_total"] = cur.execute("SELECT COUNT(*) FROM upload_batches").fetchone()[0]
+        conn.close()
+    except Exception:
+        # Debug endpoint should never crash the server.
+        info["db_query_error"] = True
+    return info
 
 
 @app.get("/api/admin/ai-ping")
@@ -1327,25 +1338,38 @@ async def ops_upload_catalog(file: UploadFile = File(...)) -> dict[str, Any]:
     # 不用 read_only：部分 BI/药网导出表在 read_only 下会错误只解析出首列，导致缺列误报
     wb = load_workbook(io.BytesIO(content), read_only=False, data_only=True)
     ws = wb[wb.sheetnames[0]]
-    row_iter = ws.iter_rows(values_only=True)
-    header_row = next(row_iter, None)
-    if not header_row:
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
         raise HTTPException(status_code=400, detail="文件为空")
 
-    headers = [str(x).strip() if x is not None else "" for x in header_row]
-    sku_idx = find_col_idx(headers, {"sku", "sku_id", "商品编码", "产品编码", "商品sku", "商品id", "货号"})
+    headers = [str(x).strip() if x is not None else "" for x in rows[0]]
+    sku_idx = find_col_idx(headers, {"sku", "sku_id", "商品sku", "商品id", "货号"})
+    product_code_idx = find_col_idx(headers, {"商品编码", "产品编码", "外部编码", "编码"})
+    standard_code_idx = find_col_idx(headers, {"标品主码", "标准品主码", "标准码", "spu", "spu编码", "标品编码"})
     name_idx = find_col_idx(headers, {"商品名称", "产品名称", "药品名称", "名称", "商品名", "通用名"})
+    mfr_idx = find_col_idx(headers, {"生产厂商", "厂家", "生产厂家", "厂商"})
     cat_idx = find_col_idx(headers, {"类目", "商品类目", "一级类目", "二级类目", "品类", "科室"})
-    price_idx = find_col_idx(headers, {"成交价", "单价", "实付单价", "吊牌价", "销售价", "销售单价", "gmv"})
+    biz_mode_idx = find_col_idx(headers, {"业务模式", "模式"})
+    platform_idx = find_col_idx(headers, {"平台", "渠道", "销售渠道"})
+    merchant_idx = find_col_idx(headers, {"商家名称", "店铺名称", "商家", "店铺"})
+    price_idx = find_col_idx(headers, {"成交价", "单价", "实付单价", "吊牌价", "销售价", "销售单价", "零售价", "指导价", "gmv"})
     cost_idx = find_col_idx(headers, {"成本", "采购价", "供货价", "成本价"})
     qty_idx = find_col_idx(headers, {"销量", "数量", "销售数量", "出库数量", "件数"})
     gmv_idx = find_col_idx(headers, {"gmv", "销售额", "订单金额"})
+    revenue_idx = find_col_idx(headers, {"revenue", "rev", "营收", "收入"})
+    gaap_profit_idx = find_col_idx(headers, {"gaap毛利额(去税)", "gaap毛利额", "毛利额", "毛利"})
+    gaap_margin_idx = find_col_idx(headers, {"gaap毛利率(去税)(%)", "gaap毛利率", "毛利率"})
+    order_cnt_idx = find_col_idx(headers, {"订单数", "订单量"})
+    customer_cnt_idx = find_col_idx(headers, {"顾客数", "用户数", "买家数"})
+    arpo_idx = find_col_idx(headers, {"arpo", "客单价"})
 
     missing = []
-    if sku_idx is None:
+    # 允许：仅标品主码（standard_code）也可作为“识别锚点”
+    if sku_idx is None and product_code_idx is None and standard_code_idx is None:
         missing.append("SKU")
     if name_idx is None:
         missing.append("商品名称")
+    # 运营约定：待组货清单可不提供「价格」，只关心 SKU 碰撞；缺失时用成本反推或占位价入库（仍满足 DB 非空约束）。
     if missing:
         head_preview = "、".join(h for h in headers[:30] if h) or "(空)"
         raise HTTPException(
@@ -1356,55 +1380,86 @@ async def ops_upload_catalog(file: UploadFile = File(...)) -> dict[str, Any]:
     batch_id = f"batch_{uuid.uuid4().hex[:10]}"
     now = now_iso()
     parsed = []
-    for row in row_iter:
-        sku = str(row[sku_idx]).strip() if row[sku_idx] is not None else ""
+    for row in rows[1:]:
+        sku = str(row[sku_idx]).strip() if sku_idx is not None and row[sku_idx] is not None else ""
+        product_code = str(row[product_code_idx]).strip() if product_code_idx is not None and row[product_code_idx] is not None else ""
+        if not sku:
+            sku = product_code
         name = str(row[name_idx]).strip() if row[name_idx] is not None else ""
         if not sku or not name:
             continue
+        standard_code = str(row[standard_code_idx]).strip() if standard_code_idx is not None and row[standard_code_idx] else ""
+        if not sku:
+            sku = standard_code
+        manufacturer = str(row[mfr_idx]).strip() if mfr_idx is not None and row[mfr_idx] else ""
         category = str(row[cat_idx]).strip() if cat_idx is not None and row[cat_idx] else "未分类"
-        qty = int(to_float(row[qty_idx], 1)) if qty_idx is not None else 1
-        if qty <= 0:
-            qty = 1
-        gmv = to_float(row[gmv_idx], 0) if gmv_idx is not None else 0
-        price = to_float(row[price_idx], 0) if price_idx is not None else 0
-        if price <= 0 and gmv > 0:
-            price = round(gmv / qty, 2)
-        if price <= 0:
-            # 组货阶段不以价格为门槛；缺失时给占位值。
-            price = 99.0
-        cost = to_float(row[cost_idx], 0) if cost_idx is not None else 0
-        if cost <= 0:
+        business_mode = str(row[biz_mode_idx]).strip() if biz_mode_idx is not None and row[biz_mode_idx] else ""
+        platform = str(row[platform_idx]).strip() if platform_idx is not None and row[platform_idx] else ""
+        merchant_name = str(row[merchant_idx]).strip() if merchant_idx is not None and row[merchant_idx] else ""
+        price = to_float(row[price_idx], 0) if price_idx is not None else 0.0
+        cost = to_float(row[cost_idx], 0) if cost_idx is not None else 0.0
+        if price <= 0 and cost > 0:
+            price = round(cost / 0.78, 2)
+        elif price <= 0 and cost <= 0:
+            price = 1.0
             cost = round(price * 0.78, 2)
-        if gmv <= 0:
-            gmv = round(price * qty, 2)
-        parsed.append((batch_id, sku, name, category, price, cost, max(qty, 1), gmv, infer_role(category, name), now))
+        elif cost <= 0:
+            cost = round(price * 0.78, 2)
+        qty = int(to_float(row[qty_idx], 1)) if qty_idx is not None else 1
+        gmv = to_float(row[gmv_idx], 0) if gmv_idx is not None else round(price * max(qty, 1), 2)
+        revenue = to_float(row[revenue_idx], 0) if revenue_idx is not None else 0.0
+        gaap_profit = to_float(row[gaap_profit_idx], 0) if gaap_profit_idx is not None else 0.0
+        gaap_margin = to_float(row[gaap_margin_idx], 0) if gaap_margin_idx is not None else 0.0
+        order_cnt = int(to_float(row[order_cnt_idx], qty)) if order_cnt_idx is not None else int(max(qty, 1))
+        customer_cnt = int(to_float(row[customer_cnt_idx], 0)) if customer_cnt_idx is not None else 0
+        arpo = to_float(row[arpo_idx], 0) if arpo_idx is not None else 0.0
+        parsed.append(
+            (
+                batch_id,
+                sku,
+                product_code,
+                standard_code,
+                name,
+                manufacturer,
+                category,
+                business_mode,
+                platform,
+                merchant_name,
+                price,
+                cost,
+                max(qty, 1),
+                gmv,
+                revenue,
+                gaap_profit,
+                gaap_margin,
+                max(order_cnt, 0),
+                max(customer_cnt, 0),
+                arpo,
+                infer_role(category, name),
+                now,
+            )
+        )
 
     if not parsed:
         raise HTTPException(status_code=400, detail="没有可导入的数据行")
 
     conn = db_conn()
     cur = conn.cursor()
-    try:
-        _execute_with_retry(
-            cur,
-            "INSERT INTO upload_batches (id, filename, total_rows, created_at) VALUES (?, ?, ?, ?)",
-            (batch_id, file.filename, len(parsed), now),
-        )
-        _executemany_with_retry(
-            cur,
-            """
-            INSERT INTO uploaded_products (
-              batch_id, sku_id, product_name, category, price, cost, qty, gmv, role_hint, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            parsed,
-        )
-        conn.commit()
-    except sqlite3.OperationalError as exc:
-        conn.rollback()
-        if "locked" in str(exc).lower():
-            raise HTTPException(status_code=503, detail="数据库忙，请3秒后重试一次上传") from exc
-        raise
+    cur.execute(
+        "INSERT INTO upload_batches (id, filename, total_rows, created_at) VALUES (?, ?, ?, ?)",
+        (batch_id, file.filename, len(parsed), now),
+    )
+    cur.executemany(
+        """
+        INSERT INTO uploaded_products (
+          batch_id, sku_id, product_code, standard_code, product_name, manufacturer, category, business_mode,
+          platform, merchant_name, price, cost, qty, gmv, revenue, gaap_profit, gaap_margin,
+          order_cnt, customer_cnt, arpo, role_hint, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        parsed,
+    )
+    conn.commit()
     conn.close()
     return {"batch_id": batch_id, "total_rows": len(parsed)}
 
@@ -1427,46 +1482,48 @@ async def ops_upload_library(
     if not rows:
         raise HTTPException(status_code=400, detail="文件为空")
     headers = [str(x).strip() if x is not None else "" for x in rows[0]]
-    sku_idx = find_col_idx(headers, {"sku", "sku_id", "商品编码", "商品sku", "商品id", "货号"})
+    sku_idx = find_col_idx(headers, {"sku", "sku_id", "商品编码", "产品编码", "商品sku", "商品id", "货号"})
+    product_code_idx = find_col_idx(headers, {"商品编码", "产品编码", "外部编码", "编码"})
+    standard_code_idx = find_col_idx(headers, {"标品主码", "标准品主码", "标准码", "spu", "spu编码", "标品编码"})
     name_idx = find_col_idx(headers, {"商品名称", "产品名称", "药品名称", "名称", "商品名", "通用名"})
-    product_code_idx = find_col_idx(headers, {"主码", "标品主码", "产品编码", "药网编码", "产品id"})
-    manufacturer_idx = find_col_idx(headers, {"生产厂商", "厂商", "厂家"})
-    department_idx = find_col_idx(headers, {"科室"})
-    item_code_idx = find_col_idx(headers, {"商品编码"})
-    level1_cat_idx = find_col_idx(headers, {"一级类目", "类目", "商品类目", "品类"})
-    cat_idx = level1_cat_idx if level1_cat_idx is not None else department_idx
+    cat_idx = find_col_idx(headers, {"类目", "商品类目", "一级类目", "二级类目", "品类", "科室"})
+    mfr_idx = find_col_idx(headers, {"生产厂商", "厂家", "生产厂家", "厂商"})
     price_idx = find_col_idx(headers, {"成交价", "单价", "实付单价", "吊牌价", "销售价", "销售单价", "gmv"})
     cost_idx = find_col_idx(headers, {"成本", "采购价", "供货价", "成本价", "revenue"})
     role_idx = find_col_idx(headers, {"角色", "role", "商品角色", "类型"})
-    if sku_idx is None:
-        sku_idx = item_code_idx
-    if sku_idx is None or name_idx is None:
-        head_preview = "、".join(h for h in headers[:30] if h) or "(空)"
+    missing = []
+    if sku_idx is None and product_code_idx is None and standard_code_idx is None:
+        missing.append("SKU(或商品编码/标品主码)")
+    if name_idx is None:
+        missing.append("商品名称")
+    if price_idx is None:
+        missing.append("价格")
+    if missing:
+        head_preview = "、".join(headers[:30]) or "(空)"
         raise HTTPException(
             status_code=400,
-            detail=(
-                "缺少关键字段：需要「商品编码（或 SKU）」与「产品名称」。"
-                "主码列可选，支持表头：主码、标品主码、产品编码等。"
-                f"当前识别到的表头：{head_preview}"
-            ),
+            detail=f"缺少关键字段: {', '.join(missing)}。当前表头：{head_preview}",
         )
     now = now_iso()
     upserts = []
     for row in rows[1:]:
-        sku = str(row[sku_idx]).strip() if row[sku_idx] is not None else ""
+        sku = ""
+        if sku_idx is not None and row[sku_idx] is not None:
+            sku = str(row[sku_idx]).strip()
+        product_code = str(row[product_code_idx]).strip() if product_code_idx is not None and row[product_code_idx] is not None else ""
+        standard_code = str(row[standard_code_idx]).strip() if standard_code_idx is not None and row[standard_code_idx] is not None else ""
+        if not sku:
+            sku = product_code or standard_code
+        if not sku:
+            continue
         name = str(row[name_idx]).strip() if row[name_idx] is not None else ""
         if not sku or not name:
             continue
         category = str(row[cat_idx]).strip() if cat_idx is not None and row[cat_idx] else "未分类"
-        product_code = str(row[product_code_idx]).strip() if product_code_idx is not None and row[product_code_idx] else ""
-        manufacturer = str(row[manufacturer_idx]).strip() if manufacturer_idx is not None and row[manufacturer_idx] else ""
-        department = str(row[department_idx]).strip() if department_idx is not None and row[department_idx] else ""
-        item_code = str(row[item_code_idx]).strip() if item_code_idx is not None and row[item_code_idx] else sku
-        level1_category = str(row[level1_cat_idx]).strip() if level1_cat_idx is not None and row[level1_cat_idx] else category
-        price = to_float(row[price_idx], 0) if price_idx is not None else 0
-        # 库存清单常常没有价格字段，使用默认定价占位，后续可在后台维护真实价格。
+        manufacturer = str(row[mfr_idx]).strip() if mfr_idx is not None and row[mfr_idx] is not None else ""
+        price = to_float(row[price_idx], 0)
         if price <= 0:
-            price = 99.0
+            continue
         cost = to_float(row[cost_idx], 0) if cost_idx is not None else 0
         if cost <= 0:
             cost = round(price * 0.78, 2)
@@ -1475,23 +1532,11 @@ async def ops_upload_library(
         if role not in {"main", "addon"}:
             role = infer_role(category, name)
         margin_rate = max(0.01, min(0.95, (price - cost) / max(price, 1)))
+        # 若未提供“产品编码”，用“标品主码”兜底填到产品编码列（供页面展示与运营检索）
+        if not product_code and standard_code:
+            product_code = standard_code
         upserts.append(
-            (
-                sku,
-                name,
-                product_code,
-                manufacturer,
-                department,
-                item_code,
-                level1_category,
-                category,
-                role,
-                cost,
-                price,
-                round(margin_rate, 3),
-                1,
-                now,
-            )
+            (sku, name, category, role, product_code, standard_code, manufacturer, cost, price, round(margin_rate, 3), 1, now)
         )
     if not upserts:
         raise HTTPException(status_code=400, detail="没有可导入商品")
@@ -1500,18 +1545,16 @@ async def ops_upload_library(
     cur.executemany(
         """
         INSERT INTO products (
-          sku_id, product_name, product_code, manufacturer, department, item_code, level1_category,
-          category, role, cost, original_price, gross_margin_rate, active, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          sku_id, product_name, category, role, product_code, standard_code, manufacturer,
+          cost, original_price, gross_margin_rate, active, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(sku_id) DO UPDATE SET
           product_name=excluded.product_name,
-          product_code=excluded.product_code,
-          manufacturer=excluded.manufacturer,
-          department=excluded.department,
-          item_code=excluded.item_code,
-          level1_category=excluded.level1_category,
           category=excluded.category,
           role=excluded.role,
+          product_code=excluded.product_code,
+          standard_code=excluded.standard_code,
+          manufacturer=excluded.manufacturer,
           cost=excluded.cost,
           original_price=excluded.original_price,
           gross_margin_rate=excluded.gross_margin_rate,
@@ -1550,12 +1593,9 @@ def ops_inventory_list(
     where = ["active=1"]
     params: list[Any] = []
     if q:
-        where.append(
-            "(sku_id LIKE ? OR product_name LIKE ? OR category LIKE ? "
-            "OR COALESCE(product_code, '') LIKE ? OR COALESCE(item_code, '') LIKE ?)"
-        )
+        where.append("(sku_id LIKE ? OR product_name LIKE ? OR category LIKE ?)")
         like = f"%{q}%"
-        params.extend([like, like, like, like, like])
+        params.extend([like, like, like])
     if role in {"main", "addon"}:
         where.append("role=?")
         params.append(role)
@@ -1564,20 +1604,9 @@ def ops_inventory_list(
     rows = cur.execute(
         f"""
         SELECT
-          sku_id,
-          product_name,
-          COALESCE(product_code, '') AS product_code,
-          COALESCE(manufacturer, '') AS manufacturer,
-          COALESCE(department, '') AS department,
-          COALESCE(item_code, '') AS item_code,
-          COALESCE(level1_category, '') AS level1_category,
-          category,
-          role,
-          cost,
-          original_price,
-          gross_margin_rate,
-          active,
-          updated_at
+          sku_id, product_name, category, role, product_code, standard_code, manufacturer,
+          category AS department,
+          cost, original_price, gross_margin_rate, active, updated_at
         FROM products
         WHERE {where_sql}
         ORDER BY updated_at DESC
@@ -1599,7 +1628,7 @@ async def ops_inventory_upload(
 
 @app.get("/api/admin/budget")
 def admin_budget() -> dict[str, Any]:
-    setting = _refresh_ai_brain_from_setting()
+    setting = _get_llm_setting()
     conn = db_conn()
     cur = conn.cursor()
     usage = cur.execute(
@@ -1616,16 +1645,26 @@ def admin_budget() -> dict[str, Any]:
     monthly_budget = float(setting.get("monthly_budget_usd", 50) or 50)
     estimated = float(usage["estimated_cost"] or 0)
     rate = round((estimated / monthly_budget), 4) if monthly_budget > 0 else 0
+    dash = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    db_base = (str(setting.get("base_url") or "").strip()) or dash
+    db_timeout = setting.get("timeout_sec")
+    try:
+        timeout_out = float(db_timeout) if db_timeout is not None else float(ai_brain.timeout)
+    except (TypeError, ValueError):
+        timeout_out = float(ai_brain.timeout)
+    key_cfg = bool(
+        (str(setting.get("api_key") or "").strip()) or os.getenv("BAILIAN_API_KEY", "").strip()
+    )
     return {
         "provider": setting.get("provider", "bailian"),
         "model": setting.get("model", ai_brain.model),
         "enabled": bool(setting.get("enabled", 1)),
-        "base_url": str(setting.get("base_url") or ai_brain.base_url),
-        "timeout_sec": float(setting.get("timeout_sec") or ai_brain.timeout),
-        "api_key_configured": bool(setting.get("api_key") or ai_brain.api_key),
         "monthly_budget_usd": monthly_budget,
         "input_cost_per_1k": float(setting.get("input_cost_per_1k", 0.0012) or 0.0012),
         "output_cost_per_1k": float(setting.get("output_cost_per_1k", 0.0024) or 0.0024),
+        "base_url": db_base,
+        "timeout_sec": timeout_out,
+        "api_key_configured": key_cfg,
         "prompt_tokens": int(usage["prompt_tokens"] or 0),
         "completion_tokens": int(usage["completion_tokens"] or 0),
         "total_tokens": int(usage["total_tokens"] or 0),
@@ -1636,65 +1675,84 @@ def admin_budget() -> dict[str, Any]:
 
 class BudgetSettingIn(BaseModel):
     model: str
-    api_key: str | None = None
-    base_url: str | None = None
-    timeout_sec: float = 1.2
     enabled: bool = True
     monthly_budget_usd: float = 50
     input_cost_per_1k: float = 0.0012
     output_cost_per_1k: float = 0.0024
+    api_key: str | None = None
+    base_url: str | None = None
+    timeout_sec: float | None = None
 
 
 @app.post("/api/admin/budget/model")
 def admin_update_budget_setting(data: BudgetSettingIn) -> dict[str, Any]:
+    dash = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     conn = db_conn()
     cur = conn.cursor()
     cur.execute("SELECT * FROM llm_settings ORDER BY id DESC LIMIT 1")
     row = cur.fetchone()
-    api_key_to_save = (data.api_key or "").strip() if data.api_key is not None else (row["api_key"] if row else "")
+    now = now_iso()
     if row:
+        ex = dict(row)
+        if data.api_key is not None and str(data.api_key).strip():
+            api_key_final = str(data.api_key).strip()
+        else:
+            api_key_final = str(ex.get("api_key") or "").strip()
+        base_final = (str(data.base_url or "").strip()) or (str(ex.get("base_url") or "").strip()) or dash
+        if data.timeout_sec is not None:
+            timeout_final = float(data.timeout_sec)
+        else:
+            try:
+                timeout_final = float(ex.get("timeout_sec") or 8)
+            except (TypeError, ValueError):
+                timeout_final = 8.0
         cur.execute(
             """
             UPDATE llm_settings
-            SET model=?, api_key=?, base_url=?, timeout_sec=?, enabled=?, monthly_budget_usd=?, input_cost_per_1k=?, output_cost_per_1k=?, updated_at=?
+            SET model=?, enabled=?, monthly_budget_usd=?, input_cost_per_1k=?, output_cost_per_1k=?,
+                api_key=?, base_url=?, timeout_sec=?, updated_at=?
             WHERE id=?
             """,
             (
                 data.model,
-                api_key_to_save,
-                (data.base_url or "").strip() or ai_brain.base_url,
-                max(float(data.timeout_sec), 0.5),
                 1 if data.enabled else 0,
                 data.monthly_budget_usd,
                 data.input_cost_per_1k,
                 data.output_cost_per_1k,
-                now_iso(),
-                row["id"],
+                api_key_final or None,
+                base_final,
+                timeout_final,
+                now,
+                ex["id"],
             ),
         )
     else:
+        api_key_ins = str(data.api_key).strip() if data.api_key else ""
+        base_ins = (str(data.base_url or "").strip()) or dash
+        timeout_ins = float(data.timeout_sec) if data.timeout_sec is not None else 8.0
         cur.execute(
             """
             INSERT INTO llm_settings (
-              provider, model, api_key, base_url, timeout_sec, enabled, monthly_budget_usd, input_cost_per_1k, output_cost_per_1k, updated_at
+              provider, model, enabled, monthly_budget_usd, input_cost_per_1k, output_cost_per_1k,
+              api_key, base_url, timeout_sec, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 "bailian",
                 data.model,
-                api_key_to_save,
-                (data.base_url or "").strip() or ai_brain.base_url,
-                max(float(data.timeout_sec), 0.5),
                 1 if data.enabled else 0,
                 data.monthly_budget_usd,
                 data.input_cost_per_1k,
                 data.output_cost_per_1k,
-                now_iso(),
+                api_key_ins or None,
+                base_ins,
+                timeout_ins,
+                now,
             ),
         )
     conn.commit()
     conn.close()
-    _refresh_ai_brain_from_setting()
+    refresh_ai_brain_from_db()
     return {"message": "saved"}
 
 
@@ -1707,11 +1765,8 @@ def ops_generate_strategies(
     use_ai: bool = Query(default=True),
     force_ai_only: bool = Query(default=False),
 ) -> dict[str, Any]:
-    from collections import Counter
-
     conn = db_conn()
     cur = conn.cursor()
-    relation_engine = BundleEngine()
     order_sql = "total_qty DESC, total_gmv DESC"
     if sort_by == "gmv":
         order_sql = "total_gmv DESC, total_qty DESC"
@@ -1726,19 +1781,13 @@ def ops_generate_strategies(
           SUM(qty) AS total_qty,
           SUM(gmv) AS total_gmv
         FROM uploaded_products
-        WHERE batch_id=?
+        WHERE batch_id=? AND role_hint='main'
         GROUP BY sku_id
         ORDER BY {order_sql}
         LIMIT ?
         """,
         (batch_id, top_n),
     ).fetchall()
-    if not mains:
-        conn.close()
-        raise HTTPException(
-            status_code=400,
-            detail="该 batch_id 在数据库中没有待组货商品。请重新上传 Excel，或确认服务使用的 APP_DB_PATH 与上传时一致。",
-        )
     batch_candidates = cur.execute(
         """
         SELECT
@@ -1748,13 +1797,13 @@ def ops_generate_strategies(
           AVG(price) AS price,
           AVG(cost) AS cost
         FROM uploaded_products
-        WHERE batch_id=?
+        WHERE batch_id=? AND role_hint='addon'
         GROUP BY sku_id
         """,
         (batch_id,),
     ).fetchall()
     library_candidates = cur.execute(
-        "SELECT sku_id, product_name, category, original_price AS price, cost FROM products WHERE active=1"
+        "SELECT sku_id, product_name, category, original_price AS price, cost FROM products WHERE active=1 AND role='addon'"
     ).fetchall()
     if candidate_source == "batch":
         candidate_rows = batch_candidates
@@ -1769,18 +1818,13 @@ def ops_generate_strategies(
     created = 0
     ai_count = 0
     rule_count = 0
-    selected_counter: Counter[str] = Counter()
+    # Batch-level diversity: avoid all recommendations collapsing to the same SKU.
+    selection_counts: dict[str, int] = {}
     skip_no_candidates = 0
     skip_exception = 0
     errors: list[dict[str, str]] = []
     now = now_iso()
-    try:
-        _execute_with_retry(cur, "DELETE FROM bundle_recommendations WHERE batch_id=?", (batch_id,))
-    except sqlite3.OperationalError as exc:
-        conn.close()
-        if "locked" in str(exc).lower():
-            raise HTTPException(status_code=503, detail="数据库忙，请稍后重试生成") from exc
-        raise
+    cur.execute("DELETE FROM bundle_recommendations WHERE batch_id=?", (batch_id,))
     for m in mains:
         policy = cur.execute(
             "SELECT * FROM policies WHERE category=? AND active=1 ORDER BY updated_at DESC LIMIT 1",
@@ -1795,33 +1839,17 @@ def ops_generate_strategies(
             price=m["price"],
             cost=m["cost"],
         )
-        main_cat = str(m["category"] or "")
-        rel_tokens = set(relation_engine.relation_map.get(main_cat, set()))
-        if main_cat:
-            rel_tokens.add(main_cat)
-        prefetched: list[CandidateItem] = []
-        fallback_pool: list[CandidateItem] = []
-        for a in candidate_rows:
-            if a["sku_id"] == m["sku_id"]:
-                continue
-            item = CandidateItem(
+        candidate_pool = [
+            CandidateItem(
                 sku_id=a["sku_id"],
                 product_name=a["product_name"],
                 cost=a["cost"],
                 original_price=a["price"],
                 category=a["category"],
             )
-            if relation_engine.is_addon_inappropriate_for_main(
-                m["product_name"], m["category"], a["product_name"], a["category"]
-            ):
-                continue
-            text = f"{a['product_name']}{a['category'] or ''}"
-            if rel_tokens and any(t in text for t in rel_tokens):
-                prefetched.append(item)
-            else:
-                fallback_pool.append(item)
-        # 先用强相关候选，不足时补充，且限制总候选规模，避免几千SKU导致长时间卡住。
-        candidate_pool = (prefetched[:260] + fallback_pool[:120])[:320]
+            for a in candidate_rows
+            if a["sku_id"] != m["sku_id"]
+        ]
         if not candidate_pool:
             skip_no_candidates += 1
             continue
@@ -1839,30 +1867,8 @@ def ops_generate_strategies(
                 variant="A",
                 prefer_ai=use_ai,
                 force_ai_only=force_ai_only,
+                selection_counts=selection_counts,
             )
-            # 限制同一副品在单批次中的占比，防止“单品灌全场”。
-            rec_selected_name = result.get("recommendation", {}).get("product_name", "")
-            if rec_selected_name:
-                future_total = created + 1
-                future_cnt = selected_counter[rec_selected_name] + 1
-                max_share = 0.12
-                if future_total >= 30 and (future_cnt / future_total) > max_share:
-                    filtered_pool = [c for c in candidate_pool if c.product_name != rec_selected_name]
-                    if filtered_pool:
-                        result = _build_recommendation_result(
-                            main_item=main_item,
-                            user_id=None,
-                            candidates=filtered_pool,
-                            policy_like={
-                                "logic_type": policy["logic_type"],
-                                "prompt_hint": policy["prompt_hint"],
-                                "margin_rate": policy["margin_rate"],
-                            },
-                            strategy=strategy,
-                            variant="A",
-                            prefer_ai=use_ai,
-                            force_ai_only=False,
-                        )
         except ValueError as exc:
             if "候选池为空" in str(exc):
                 skip_no_candidates += 1
@@ -1877,32 +1883,20 @@ def ops_generate_strategies(
                 errors.append({"sku_id": m["sku_id"], "product_name": m["product_name"], "reason": str(exc) or "unexpected_error"})
             continue
         rec = result["recommendation"]
-        selected_counter[rec["product_name"]] += 1
         src = rec.get("decision_trace", {}).get("source", "rule_engine")
         if src == "bailian_llm":
             ai_count += 1
         else:
             rule_count += 1
-        main_ic = _resolve_item_code(cur, str(m["sku_id"]))
-        sel_ic = _resolve_item_code(cur, str(rec["selected_sku_id"]))
-        pkg_nm = (rec.get("package_name") or "").strip() or BundleEngine().build_package_name(
-            m["product_name"],
-            m["category"],
-            rec["product_name"],
-            None,
-            str(rec.get("medical_logic") or ""),
-        )
-        rec_out = dict(rec)
-        rec_out["package_name"] = pkg_nm
-        _execute_with_retry(
-            cur,
+        # Update diversity counts after we know the final selected SKU.
+        selection_counts[str(rec.get("selected_sku_id", ""))] = selection_counts.get(str(rec.get("selected_sku_id", "")), 0) + 1
+        cur.execute(
             """
             INSERT INTO bundle_recommendations (
               batch_id, main_sku_id, main_product_name, main_category, selected_sku_id,
               selected_product_name, medical_logic, addon_price, projected_profit, sales_copy,
-              package_name, main_item_code, selected_item_code,
               decision_payload, status, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)
             """,
             (
                 batch_id,
@@ -1915,24 +1909,14 @@ def ops_generate_strategies(
                 rec["pricing_strategy"]["addon_price"],
                 rec["projected_profit"],
                 rec["sales_copy"],
-                pkg_nm,
-                main_ic,
-                sel_ic,
-                json.dumps(rec_out, ensure_ascii=False),
+                json.dumps(rec, ensure_ascii=False),
                 now,
                 now,
             ),
         )
         created += 1
 
-    try:
-        conn.commit()
-    except sqlite3.OperationalError as exc:
-        conn.rollback()
-        conn.close()
-        if "locked" in str(exc).lower():
-            raise HTTPException(status_code=503, detail="数据库忙，请稍后重试生成") from exc
-        raise
+    conn.commit()
     conn.close()
     return {
         "batch_id": batch_id,
@@ -1949,10 +1933,462 @@ def ops_generate_strategies(
             "candidate_pool_size": len(candidate_rows),
             "skip_no_candidates": skip_no_candidates,
             "skip_exception": skip_exception,
-            "top_selected_products": selected_counter.most_common(8),
             "errors": errors,
         },
     }
+
+
+@app.post("/api/ops/pricing/generate")
+def ops_generate_pricing_assistant(
+    batch_id: str,
+    max_adjust_ratio: float = Query(default=0.10, ge=0.01, le=0.30),
+    sales_weight: float = Query(default=0.6, ge=0.0, le=1.0),
+    profit_weight: float = Query(default=0.4, ge=0.0, le=1.0),
+    soft_margin_floor: float = Query(default=0.05, ge=0.0, le=0.5),
+) -> dict[str, Any]:
+    conn = db_conn()
+    cur = conn.cursor()
+    rows = cur.execute(
+        """
+        SELECT
+          product_name, manufacturer, sku_id, product_code, standard_code, category, business_mode, platform, merchant_name,
+          price, cost, qty, gmv, revenue, gaap_profit, gaap_margin, order_cnt
+        FROM uploaded_products
+        WHERE batch_id=?
+        """,
+        (batch_id,),
+    ).fetchall()
+    if not rows:
+        conn.close()
+        raise HTTPException(status_code=404, detail="该批次暂无可用于定价的数据")
+
+    # 归一权重，避免调用方传错导致偏移
+    sw = max(float(sales_weight), 0.0)
+    pw = max(float(profit_weight), 0.0)
+    total_w = sw + pw
+    if total_w <= 0:
+        sw, pw = 0.6, 0.4
+    else:
+        sw, pw = sw / total_w, pw / total_w
+
+    def _is_mp(mode: str) -> bool:
+        m = (mode or "").upper()
+        return "MP" in m
+
+    grouped: dict[tuple[str, str, str, str, str, str], dict[str, Any]] = {}
+    for r in rows:
+        d = dict(r)
+        key = (
+            str(d.get("product_name") or "").strip(),
+            str(d.get("manufacturer") or "").strip(),
+            str(d.get("product_code") or "").strip(),
+            str(d.get("standard_code") or "").strip(),
+            str(d.get("business_mode") or "").strip(),
+            str(d.get("platform") or "").strip() + "|" + str(d.get("merchant_name") or "").strip(),
+        )
+        if key not in grouped:
+            grouped[key] = {
+                "product_name": key[0],
+                "manufacturer": key[1],
+                "product_code": key[2] or str(d.get("sku_id") or "").strip(),
+                "standard_code": key[3],
+                "category": str(d.get("category") or "").strip(),
+                "business_mode": key[4],
+                "platform": str(d.get("platform") or "").strip(),
+                "merchant_name": str(d.get("merchant_name") or "").strip(),
+                "gmv": 0.0,
+                "revenue": 0.0,
+                "gaap_profit": 0.0,
+                "qty": 0.0,
+                "order_cnt": 0.0,
+                "cost_weighted_sum": 0.0,
+            }
+        g = grouped[key]
+        qty = max(to_float(d.get("qty"), 0), 0.0)
+        order_cnt = max(to_float(d.get("order_cnt"), 0), 0.0)
+        gmv = to_float(d.get("gmv"), 0.0)
+        revenue = to_float(d.get("revenue"), 0.0)
+        gp = to_float(d.get("gaap_profit"), 0.0)
+        cost = max(to_float(d.get("cost"), 0.0), 0.0)
+        g["gmv"] += gmv
+        g["revenue"] += revenue
+        g["gaap_profit"] += gp
+        g["qty"] += qty
+        g["order_cnt"] += order_cnt
+        g["cost_weighted_sum"] += cost * max(qty, 1.0)
+
+    items: list[dict[str, Any]] = []
+    for _, g in grouped.items():
+        sales_base = max(g["order_cnt"], g["qty"], 1.0)
+        current_price = g["gmv"] / sales_base if g["gmv"] else 0.0
+        if current_price <= 0:
+            continue
+        avg_cost = g["cost_weighted_sum"] / max(g["qty"], 1.0)
+        mp_mode = _is_mp(g["business_mode"])
+        if mp_mode:
+            profit_metric = (g["revenue"] / g["gmv"]) if abs(g["gmv"]) > 1e-9 else 0.0
+            current_margin = (g["gaap_profit"] / g["revenue"]) if abs(g["revenue"]) > 1e-9 else 1.0
+        else:
+            if abs(g["revenue"]) > 1e-9:
+                current_margin = g["gaap_profit"] / g["revenue"]
+            else:
+                current_margin = (current_price - avg_cost) / max(current_price, 1e-9)
+            profit_metric = current_margin
+        items.append(
+            {
+                **g,
+                "sales_metric": sales_base,
+                "current_price": current_price,
+                "avg_cost": avg_cost,
+                "profit_metric": profit_metric,
+                "current_margin": current_margin,
+                "mp_mode": mp_mode,
+            }
+        )
+
+    if not items:
+        conn.close()
+        raise HTTPException(status_code=400, detail="该批次缺少可计算的 GMV/销量数据")
+
+    peer_buckets_exact: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    peer_buckets_pid_mode: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    peer_buckets_cat_mode: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    peer_buckets_mode: dict[str, list[dict[str, Any]]] = {}
+    for it in items:
+        pid = (it["standard_code"] or it["product_code"] or it["product_name"]).strip()
+        mode = it["business_mode"]
+        category = (it.get("category") or "未分类").strip() or "未分类"
+        bkey = (pid, it["manufacturer"], mode)
+        peer_buckets_exact.setdefault(bkey, []).append(it)
+        peer_buckets_pid_mode.setdefault((pid, mode), []).append(it)
+        peer_buckets_cat_mode.setdefault((category, mode), []).append(it)
+        peer_buckets_mode.setdefault(mode, []).append(it)
+
+    now = now_iso()
+    cur.execute("DELETE FROM pricing_recommendations WHERE batch_id=?", (batch_id,))
+    created = 0
+    up = 0
+    down = 0
+    keep = 0
+    for it in items:
+        pid = (it["standard_code"] or it["product_code"] or it["product_name"]).strip()
+        mode = it["business_mode"]
+        category = (it.get("category") or "未分类").strip() or "未分类"
+        peers = peer_buckets_exact.get((pid, it["manufacturer"], mode), [])
+        peer_source = "exact"
+        if len(peers) < 3:
+            peers = peer_buckets_pid_mode.get((pid, mode), peers)
+            peer_source = "pid_mode"
+        if len(peers) < 3:
+            peers = peer_buckets_cat_mode.get((category, mode), peers)
+            peer_source = "category_mode"
+        if len(peers) < 3:
+            peers = peer_buckets_mode.get(mode, peers) or peers
+            peer_source = "mode_fallback"
+        if not peers:
+            peers = [it]
+            peer_source = "self_only"
+        peer_sales = sum(x["sales_metric"] for x in peers) / max(len(peers), 1)
+        peer_profit = sum(x["profit_metric"] for x in peers) / max(len(peers), 1)
+        # 四象限决策：
+        # X轴：销量相对同品平均（好/差）
+        # Y轴：利润相对同品平均（好/差）
+        sales_delta = (it["sales_metric"] - peer_sales) / max(peer_sales, 1.0)
+        profit_denom = max(abs(peer_profit), 0.01)
+        profit_delta = (it["profit_metric"] - peer_profit) / profit_denom
+        sales_delta = clamp(sales_delta, -1.0, 1.0)
+        profit_delta = clamp(profit_delta, -1.0, 1.0)
+
+        sales_good = sales_delta >= 0.0
+        profit_good = profit_delta >= 0.0
+
+        # 定义象限：
+        # Q1：销量好 + 利润好（小幅提价）
+        # Q2：销量好 + 利润差（提价修利润）
+        # Q3：销量差 + 利润好（降价拉销量）
+        # Q4：销量差 + 利润差（小幅降价先拉量，利润用保护线兜住）
+        if sales_good and profit_good:
+            quadrant = "Q1"
+            delta = max_adjust_ratio * clamp(profit_delta, 0.0, 1.0) * profit_weight * 0.45
+        elif sales_good and (not profit_good):
+            quadrant = "Q2"
+            delta = max_adjust_ratio * clamp(abs(profit_delta), 0.0, 1.0) * profit_weight * 0.75
+        elif (not sales_good) and profit_good:
+            quadrant = "Q3"
+            delta = -max_adjust_ratio * clamp(abs(sales_delta), 0.0, 1.0) * sales_weight * 0.75
+        else:
+            quadrant = "Q4"
+            delta = -max_adjust_ratio * (0.6 * clamp(abs(sales_delta), 0.0, 1.0) + 0.4 * clamp(abs(profit_delta), 0.0, 1.0)) * sales_weight * 0.65
+
+        delta = clamp(delta, -max_adjust_ratio, max_adjust_ratio)
+        # 避免“全体持平”：四象限已判断出方向时，给一个最小动作幅度（0.5%）
+        min_move = min(0.005, max_adjust_ratio)
+        if delta > 0:
+            delta = max(delta, min_move)
+        elif delta < 0:
+            delta = min(delta, -min_move)
+        # 只有极小变化才归零
+        if abs(delta) < 0.003:
+            delta = 0.0
+
+        predicted_margin = it["current_margin"]
+        if not it["mp_mode"]:
+            if it["current_margin"] < soft_margin_floor and delta < 0:
+                delta = max(delta, -0.02)
+            suggested_try = max(0.01, it["current_price"] * (1 + delta))
+            predicted_margin = (suggested_try - it["avg_cost"]) / max(suggested_try, 1e-9)
+            if predicted_margin < soft_margin_floor and delta < 0:
+                delta = delta * 0.5
+                suggested_try = max(0.01, it["current_price"] * (1 + delta))
+                predicted_margin = (suggested_try - it["avg_cost"]) / max(suggested_try, 1e-9)
+
+        suggested_price = round(max(0.01, it["current_price"] * (1 + delta)), 2)
+        if delta > 0.001:
+            action = "建议小幅提价"
+            up += 1
+        elif delta < -0.001:
+            action = "建议小幅降价"
+            down += 1
+        else:
+            action = "建议维持现价"
+            keep += 1
+
+        reason = (
+            f"{action}（销量权重{sw:.1f}/利润权重{pw:.1f}，幅度上限{max_adjust_ratio*100:.0f}%）；"
+            f"四象限{quadrant}（销量{('好' if sales_good else '差')}、利润{('好' if profit_good else '差')}，"
+            f"销量相对差{sales_delta:.3f}、利润相对差{profit_delta:.3f}，对标池{peer_source}:{len(peers)}）；"
+            f"销量指标{it['sales_metric']:.0f}，利润指标{it['profit_metric']:.3f}。"
+        )
+        confidence = clamp(0.48 + 0.06 * min(len(peers), 5) + 0.25 * abs(delta), 0.5, 0.95)
+        cur.execute(
+            """
+            INSERT INTO pricing_recommendations (
+              batch_id, product_name, manufacturer, product_code, standard_code, business_mode, platform, merchant_name,
+              current_price, suggested_price, delta_ratio, sales_metric, profit_metric, current_margin, predicted_margin,
+              confidence, reason, status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)
+            """,
+            (
+                batch_id,
+                it["product_name"],
+                it["manufacturer"],
+                it["product_code"],
+                it["standard_code"],
+                it["business_mode"],
+                it["platform"],
+                it["merchant_name"],
+                round(it["current_price"], 2),
+                suggested_price,
+                round(delta, 4),
+                round(it["sales_metric"], 2),
+                round(it["profit_metric"], 4),
+                round(it["current_margin"], 4),
+                round(predicted_margin, 4),
+                round(confidence, 3),
+                reason,
+                now,
+                now,
+            ),
+        )
+        created += 1
+
+    conn.commit()
+    conn.close()
+    return {
+        "batch_id": batch_id,
+        "generated_count": created,
+        "rule_config": {
+            "sales_weight": round(sw, 3),
+            "profit_weight": round(pw, 3),
+            "max_adjust_ratio": max_adjust_ratio,
+            "soft_margin_floor": soft_margin_floor,
+        },
+        "actions": {"up": up, "down": down, "keep": keep},
+    }
+
+
+@app.get("/api/ops/pricing/list")
+def ops_list_pricing_recommendations(
+    batch_id: str,
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    status: str | None = None,
+) -> dict[str, Any]:
+    conn = db_conn()
+    cur = conn.cursor()
+    where = ["batch_id=?"]
+    params: list[Any] = [batch_id]
+    if status:
+        where.append("status=?")
+        params.append(status)
+    where_sql = " AND ".join(where)
+    total = cur.execute(
+        f"SELECT COUNT(*) AS c FROM pricing_recommendations WHERE {where_sql}",
+        tuple(params),
+    ).fetchone()["c"]
+    rows = cur.execute(
+        f"""
+        SELECT * FROM pricing_recommendations
+        WHERE {where_sql}
+        ORDER BY ABS(delta_ratio) DESC, id DESC
+        LIMIT ? OFFSET ?
+        """,
+        tuple(params + [limit, offset]),
+    ).fetchall()
+    conn.close()
+    return {"total": total, "items": [dict(r) for r in rows]}
+
+
+@app.post("/api/ops/pricing/{item_id}/confirm")
+def ops_confirm_pricing(item_id: int) -> dict[str, str]:
+    conn = db_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE pricing_recommendations SET status='confirmed', updated_at=? WHERE id=?", (now_iso(), item_id))
+    conn.commit()
+    conn.close()
+    return {"message": "confirmed"}
+
+
+@app.post("/api/ops/pricing/sync")
+def ops_sync_pricing(batch_id: str) -> dict[str, Any]:
+    conn = db_conn()
+    cur = conn.cursor()
+    rows = cur.execute(
+        "SELECT * FROM pricing_recommendations WHERE batch_id=? AND status='confirmed'",
+        (batch_id,),
+    ).fetchall()
+    now = now_iso()
+    synced = 0
+    for r in rows:
+        d = dict(r)
+        key = "|".join(
+            [
+                str(d.get("standard_code") or ""),
+                str(d.get("product_code") or ""),
+                str(d.get("manufacturer") or ""),
+                str(d.get("business_mode") or ""),
+                str(d.get("platform") or ""),
+                str(d.get("merchant_name") or ""),
+            ]
+        )
+        if key == "|||||":
+            key = f"name|{d.get('product_name','')}"
+        cur.execute(
+            """
+            INSERT INTO pricing_rules (
+              rule_key, product_name, manufacturer, product_code, standard_code, business_mode, platform, merchant_name,
+              current_price, suggested_price, delta_ratio, current_margin, predicted_margin, reason, active, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+            ON CONFLICT(rule_key) DO UPDATE SET
+              product_name=excluded.product_name,
+              manufacturer=excluded.manufacturer,
+              product_code=excluded.product_code,
+              standard_code=excluded.standard_code,
+              business_mode=excluded.business_mode,
+              platform=excluded.platform,
+              merchant_name=excluded.merchant_name,
+              current_price=excluded.current_price,
+              suggested_price=excluded.suggested_price,
+              delta_ratio=excluded.delta_ratio,
+              current_margin=excluded.current_margin,
+              predicted_margin=excluded.predicted_margin,
+              reason=excluded.reason,
+              active=1,
+              updated_at=excluded.updated_at
+            """,
+            (
+                key,
+                d.get("product_name"),
+                d.get("manufacturer"),
+                d.get("product_code"),
+                d.get("standard_code"),
+                d.get("business_mode"),
+                d.get("platform"),
+                d.get("merchant_name"),
+                d.get("current_price"),
+                d.get("suggested_price"),
+                d.get("delta_ratio"),
+                d.get("current_margin"),
+                d.get("predicted_margin"),
+                d.get("reason"),
+                now,
+            ),
+        )
+        cur.execute("UPDATE pricing_recommendations SET status='published', updated_at=? WHERE id=?", (now, d["id"]))
+        synced += 1
+    conn.commit()
+    conn.close()
+    return {"batch_id": batch_id, "synced_count": synced}
+
+
+@app.get("/api/ops/pricing/export")
+def ops_export_pricing_csv(batch_id: str, status: str | None = None) -> Response:
+    conn = db_conn()
+    cur = conn.cursor()
+    where = ["batch_id=?"]
+    params: list[Any] = [batch_id]
+    if status:
+        where.append("status=?")
+        params.append(status)
+    where_sql = " AND ".join(where)
+    rows = cur.execute(
+        f"""
+        SELECT
+          id, product_name, manufacturer, product_code, standard_code, business_mode, platform, merchant_name,
+          current_price, suggested_price, delta_ratio, current_margin, predicted_margin, reason, status
+        FROM pricing_recommendations
+        WHERE {where_sql}
+        ORDER BY ABS(delta_ratio) DESC, id DESC
+        """,
+        tuple(params),
+    ).fetchall()
+    conn.close()
+    header = [
+        "ID",
+        "产品名称",
+        "厂家",
+        "商品编码",
+        "标品主码",
+        "业务模式",
+        "平台",
+        "商家",
+        "当前单价",
+        "建议单价",
+        "调价幅度",
+        "当前毛利率",
+        "预测毛利率",
+        "建议说明",
+        "状态",
+    ]
+    lines = [",".join(header)]
+    for r in rows:
+        d = dict(r)
+        vals = [
+            d.get("id"),
+            d.get("product_name", ""),
+            d.get("manufacturer", ""),
+            d.get("product_code", ""),
+            d.get("standard_code", ""),
+            d.get("business_mode", ""),
+            d.get("platform", ""),
+            d.get("merchant_name", ""),
+            f"{to_float(d.get('current_price'), 0):.2f}",
+            f"{to_float(d.get('suggested_price'), 0):.2f}",
+            f"{to_float(d.get('delta_ratio'), 0)*100:.2f}%",
+            f"{to_float(d.get('current_margin'), 0)*100:.2f}%",
+            f"{to_float(d.get('predicted_margin'), 0)*100:.2f}%",
+            d.get("reason", ""),
+            d.get("status", ""),
+        ]
+        esc = [f"\"{str(x).replace('\"', '\"\"')}\"" for x in vals]
+        lines.append(",".join(esc))
+    csv_text = "\ufeff" + "\n".join(lines)
+    filename = f"pricing_recommendations_{batch_id}.csv"
+    return Response(
+        content=csv_text,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/api/ops/strategies")
@@ -1964,19 +2400,21 @@ def ops_list_strategies(
 ) -> dict[str, Any]:
     conn = db_conn()
     cur = conn.cursor()
-    where = "batch_id=?"
+    where = ["batch_id=?"]
     params: list[Any] = [batch_id]
     if status:
-        where += " AND status=?"
+        where.append("status=?")
         params.append(status)
+    where_sql = " AND ".join(where)
     total = cur.execute(
-        f"SELECT COUNT(*) AS c FROM bundle_recommendations WHERE {where}",
+        f"SELECT COUNT(*) AS c FROM bundle_recommendations WHERE {where_sql}",
         tuple(params),
     ).fetchone()["c"]
     rows = cur.execute(
-        f"SELECT * FROM bundle_recommendations WHERE {where} ORDER BY id DESC LIMIT ? OFFSET ?",
+        f"SELECT * FROM bundle_recommendations WHERE {where_sql} ORDER BY id DESC LIMIT ? OFFSET ?",
         tuple(params + [limit, offset]),
     ).fetchall()
+    conn.close()
     items = []
     for r in rows:
         d = dict(r)
@@ -1988,64 +2426,8 @@ def ops_list_strategies(
             source = "rule_engine"
         d["source"] = source
         d["source_label"] = "百炼AI" if source == "bailian_llm" else "规则引擎"
-        _enrich_bundle_row(cur, d)
         items.append(d)
-    conn.close()
-    return {"total": total, "limit": limit, "offset": offset, "items": items}
-
-
-@app.get("/api/ops/strategies/export")
-def ops_export_strategies(batch_id: str) -> Response:
-    """导出当前批次全部组货为 CSV（UTF-8 BOM，Excel 可直接打开）。"""
-    conn = db_conn()
-    cur = conn.cursor()
-    rows = cur.execute(
-        """
-        SELECT * FROM bundle_recommendations
-        WHERE batch_id=?
-        ORDER BY id ASC
-        """,
-        (batch_id,),
-    ).fetchall()
-    buf = io.StringIO()
-    writer = csv.writer(buf)
-    writer.writerow(
-        [
-            "ID",
-            "套餐名称",
-            "商品A",
-            "商品A商品编码",
-            "商品B",
-            "商品B商品编码",
-            "组货卖点",
-            "商品价格",
-            "参考毛利",
-        ]
-    )
-    for r in rows:
-        d = dict(r)
-        _enrich_bundle_row(cur, d)
-        writer.writerow(
-            [
-                d.get("id"),
-                d.get("package_name") or "",
-                d.get("main_product_name") or "",
-                d.get("main_item_code") or d.get("main_sku_id") or "",
-                d.get("selected_product_name") or "",
-                d.get("selected_item_code") or d.get("selected_sku_id") or "",
-                (d.get("sales_copy") or "").replace("\r\n", " ").replace("\n", " "),
-                d.get("addon_price"),
-                d.get("projected_profit"),
-            ]
-        )
-    conn.close()
-    raw = "\ufeff" + buf.getvalue()
-    fname = f"bundles_{batch_id}.csv"
-    return Response(
-        content=raw.encode("utf-8"),
-        media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
-    )
+    return {"total": total, "items": items}
 
 
 @app.post("/api/ops/strategies/{item_id}/confirm")
@@ -2135,6 +2517,23 @@ def ops_workbench(batch_id: str) -> dict[str, Any]:
         """,
         (batch_id,),
     ).fetchall()
+    pricing_total = cur.execute("SELECT COUNT(*) AS c FROM pricing_recommendations WHERE batch_id=?", (batch_id,)).fetchone()["c"]
+    pricing_up = cur.execute(
+        "SELECT COUNT(*) AS c FROM pricing_recommendations WHERE batch_id=? AND delta_ratio>0.001",
+        (batch_id,),
+    ).fetchone()["c"]
+    pricing_down = cur.execute(
+        "SELECT COUNT(*) AS c FROM pricing_recommendations WHERE batch_id=? AND delta_ratio<-0.001",
+        (batch_id,),
+    ).fetchone()["c"]
+    pricing_confirmed = cur.execute(
+        "SELECT COUNT(*) AS c FROM pricing_recommendations WHERE batch_id=? AND status='confirmed'",
+        (batch_id,),
+    ).fetchone()["c"]
+    pricing_published = cur.execute(
+        "SELECT COUNT(*) AS c FROM pricing_recommendations WHERE batch_id=? AND status='published'",
+        (batch_id,),
+    ).fetchone()["c"]
     conn.close()
     return {
         "batch_id": batch_id,
@@ -2143,5 +2542,10 @@ def ops_workbench(batch_id: str) -> dict[str, Any]:
         "draft": draft,
         "confirmed": confirmed,
         "published": published,
+        "pricing_total": pricing_total,
+        "pricing_up": pricing_up,
+        "pricing_down": pricing_down,
+        "pricing_confirmed": pricing_confirmed,
+        "pricing_published": pricing_published,
         "top_products": [dict(r) for r in top_qty_rows],
     }
